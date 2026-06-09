@@ -130,6 +130,32 @@ int main() {
     auto tid = DYNAMIC_CALL(ctx, fn_GetCurrentThreadId, "kernel32.dll", "GetCurrentThreadId");
     printf("  GetCurrentThreadId:  %lu\n", tid);
 
+    printf("\n--- forwarded exports ---\n");
+
+    auto* heap_alloc = DYNAMIC_IMPORT(ctx, "kernel32.dll", "HeapAlloc");
+    printf("  kernel32!HeapAlloc:    %p %s\n", heap_alloc,
+           heap_alloc ? "(resolved)" : "(not found)");
+
+    // check resolved address is in ntdll
+    if (heap_alloc) {
+        auto* k32_base = reinterpret_cast<unsigned char*>(
+            syscall::peb::find_module(HASH_CT(L"kernel32.dll")));
+        auto* ntdll_base = reinterpret_cast<unsigned char*>(ctx.ntdll_base);
+        auto* addr = reinterpret_cast<unsigned char*>(heap_alloc);
+
+        bool in_ntdll = (addr >= ntdll_base && addr < ntdll_base + 0x1000000);
+        bool in_kernel32 = (addr >= k32_base && addr < k32_base + 0x1000000);
+        printf("  address in ntdll:      %s\n", in_ntdll ? "yes" : "no");
+        printf("  address in kernel32:   %s\n", in_kernel32 ? "yes" : "no");
+        if (in_ntdll)
+            printf("  forward resolved correctly\n");
+    }
+
+    // HeapFree also forwards
+    auto* heap_free = DYNAMIC_IMPORT(ctx, "kernel32.dll", "HeapFree");
+    printf("  kernel32!HeapFree:     %p %s\n", heap_free,
+           heap_free ? "(resolved)" : "(not found)");
+
     syscall::Shutdown(ctx);
     return 0;
 }
