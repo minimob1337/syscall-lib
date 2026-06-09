@@ -87,6 +87,28 @@ int main() {
         printf("  (protect = 0x%02X)\n", mbi.Protect);
     }
 
+    printf("\n[indirect syscall]\n");
+    auto* gadget = static_cast<unsigned char*>(syscall::pe::find_syscall_ret(ctx.ntdll_base));
+    auto* ntdll = static_cast<unsigned char*>(ctx.ntdll_base);
+    check(gadget != nullptr, "syscall;ret gadget found");
+    if (gadget) {
+        check(gadget >= ntdll && gadget < ntdll + 0x1000000, "gadget is inside ntdll");
+        check(gadget[0] == 0x0F && gadget[1] == 0x05 && gadget[2] == 0xC3, "gadget bytes are syscall;ret");
+    }
+    if (stub_a) {
+        // verify stub contains jmp [rip+0] (FF 25 00 00 00 00)
+        bool has_jmp = false;
+        for (int i = 0; i + 5 < 64; ++i) {
+            if (stub_a[i] == 0xFF && stub_a[i+1] == 0x25 &&
+                stub_a[i+2] == 0x00 && stub_a[i+3] == 0x00 &&
+                stub_a[i+4] == 0x00 && stub_a[i+5] == 0x00) {
+                has_jmp = true;
+                break;
+            }
+        }
+        check(has_jmp, "stub uses indirect jmp (no inline syscall)");
+    }
+
     printf("\n[cache encryption]\n");
     unsigned int target_hash = HASH_CT("NtAllocateVirtualMemory");
     bool found_plaintext = false;

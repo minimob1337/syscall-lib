@@ -114,4 +114,26 @@ namespace syscall::pe {
         return find_export_impl(module_base, func_hash, 0);
     }
 
+    // scan module for syscall;ret gadget (0F 05 C3)
+    SYSCALL_FORCEINLINE nt::PVOID find_syscall_ret(nt::PVOID module_base) {
+        auto* base = static_cast<nt::BYTE*>(module_base);
+
+        auto* dos = reinterpret_cast<nt::IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != nt::kImageDosSig)
+            return nullptr;
+
+        auto* nt_hdr = reinterpret_cast<nt::IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (nt_hdr->Signature != nt::kImageNtSig)
+            return nullptr;
+
+        nt::DWORD size = nt_hdr->OptionalHeader.SizeOfImage;
+        nt::DWORD offset = nt_hdr->OptionalHeader.SizeOfHeaders;
+
+        for (; offset + 2 < size; ++offset) {
+            if (base[offset] == 0x0F && base[offset + 1] == 0x05 && base[offset + 2] == 0xC3)
+                return base + offset;
+        }
+        return nullptr;
+    }
+
 } // namespace syscall::pe

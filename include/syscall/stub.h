@@ -67,14 +67,13 @@ namespace syscall::stub {
         return true;
     }
 
-    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn, prng::State& rng) {
+    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn, prng::State& rng, nt::PVOID syscall_gadget) {
         if (page.used + kStubSize > page.capacity)
             return 0xFFFF;
 
         nt::BYTE* dst = page.base + page.used;
         unsigned int pos = 0;
 
-        // junk before mov r10, rcx
         pos += write_junk(dst + pos, rng);
 
         // mov r10, rcx
@@ -82,7 +81,6 @@ namespace syscall::stub {
         dst[pos++] = 0x8B;
         dst[pos++] = 0xD1;
 
-        // junk before mov eax, ssn
         pos += write_junk(dst + pos, rng);
 
         // mov eax, SSN
@@ -92,15 +90,20 @@ namespace syscall::stub {
         dst[pos++] = 0x00;
         dst[pos++] = 0x00;
 
-        // junk before syscall
         pos += write_junk(dst + pos, rng);
 
-        // syscall
-        dst[pos++] = 0x0F;
-        dst[pos++] = 0x05;
+        // jmp qword ptr [rip+0] -> lands on gadget addr below
+        dst[pos++] = 0xFF;
+        dst[pos++] = 0x25;
+        dst[pos++] = 0x00;
+        dst[pos++] = 0x00;
+        dst[pos++] = 0x00;
+        dst[pos++] = 0x00;
 
-        // ret
-        dst[pos++] = 0xC3;
+        // inline gadget address (syscall;ret inside ntdll)
+        auto addr = reinterpret_cast<unsigned long long>(syscall_gadget);
+        for (int i = 0; i < 8; ++i)
+            dst[pos++] = static_cast<nt::BYTE>((addr >> (i * 8)) & 0xFF);
 
         // int3 padding
         while (pos < kStubSize)

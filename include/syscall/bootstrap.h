@@ -17,12 +17,16 @@
 
 namespace syscall::bootstrap {
 
-    // rwx stub template: mov r10, rcx / mov eax, SSN / syscall / ret
-    #define BOOTSTRAP_STUB { 0x4C, 0x8B, 0xD1, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xC3 }
+    // mov r10,rcx / mov eax,SSN / jmp [rip+0] / <gadget addr>
+    #define BOOTSTRAP_STUB { \
+        0x4C, 0x8B, 0xD1, \
+        0xB8, 0x00, 0x00, 0x00, 0x00, \
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, \
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
 
-    BSTUB_SECTION static unsigned char stub_alloc[]   = BOOTSTRAP_STUB;
-    BSTUB_SECTION static unsigned char stub_protect[] = BOOTSTRAP_STUB;
-    BSTUB_SECTION static unsigned char stub_free[]    = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_alloc[22]   = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_protect[22] = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_free[22]    = BOOTSTRAP_STUB;
 
     #undef BOOTSTRAP_STUB
     #undef BSTUB_SECTION
@@ -30,6 +34,13 @@ namespace syscall::bootstrap {
     SYSCALL_FORCEINLINE void patch_ssn(unsigned char* stub, unsigned short ssn) {
         static_cast<volatile unsigned char*>(stub)[4] = static_cast<unsigned char>(ssn & 0xFF);
         static_cast<volatile unsigned char*>(stub)[5] = static_cast<unsigned char>((ssn >> 8) & 0xFF);
+    }
+
+    SYSCALL_FORCEINLINE void patch_gadget(unsigned char* stub, nt::PVOID gadget) {
+        auto addr = reinterpret_cast<unsigned long long>(gadget);
+        volatile unsigned char* p = static_cast<volatile unsigned char*>(stub) + 14;
+        for (int i = 0; i < 8; ++i)
+            p[i] = static_cast<unsigned char>(addr >> (i * 8));
     }
 
     SYSCALL_FORCEINLINE nt::fn_NtAllocateVirtualMemory get_alloc() {

@@ -62,6 +62,10 @@ namespace syscall {
         if (alloc_ssn == 0xFFFF || protect_ssn == 0xFFFF || free_ssn == 0xFFFF)
             return false;
 
+        nt::PVOID syscall_gadget = pe::find_syscall_ret(ctx.ntdll_base);
+        if (!syscall_gadget)
+            return false;
+
         nt::fn_NtAllocateVirtualMemory fn_alloc = nullptr;
         nt::fn_NtProtectVirtualMemory fn_protect = nullptr;
 
@@ -69,8 +73,11 @@ namespace syscall {
         bootstrap::patch_ssn(bootstrap::stub_alloc, alloc_ssn);
         bootstrap::patch_ssn(bootstrap::stub_protect, protect_ssn);
         bootstrap::patch_ssn(bootstrap::stub_free, free_ssn);
+        bootstrap::patch_gadget(bootstrap::stub_alloc, syscall_gadget);
+        bootstrap::patch_gadget(bootstrap::stub_protect, syscall_gadget);
+        bootstrap::patch_gadget(bootstrap::stub_free, syscall_gadget);
 
-        if (bootstrap::stub_alloc[0] == 0x4C && bootstrap::stub_alloc[8] == 0x0F) {
+        if (bootstrap::stub_alloc[0] == 0x4C && bootstrap::stub_alloc[8] == 0xFF) {
             fn_alloc = bootstrap::get_alloc();
             if (stub::alloc_page(ctx.stub_page, fn_alloc)) {
                 fn_protect = bootstrap::get_protect();
@@ -96,7 +103,7 @@ namespace syscall {
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
                 unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
-                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng);
+                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng, syscall_gadget);
                 if (offset == 0xFFFF)
                     break;
                 ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
@@ -137,6 +144,9 @@ namespace syscall {
         bootstrap::patch_ssn(bootstrap::stub_alloc, 0);
         bootstrap::patch_ssn(bootstrap::stub_protect, 0);
         bootstrap::patch_ssn(bootstrap::stub_free, 0);
+        bootstrap::patch_gadget(bootstrap::stub_alloc, nullptr);
+        bootstrap::patch_gadget(bootstrap::stub_protect, nullptr);
+        bootstrap::patch_gadget(bootstrap::stub_free, nullptr);
 
         intrinsics::secure_zero(&ctx, sizeof(Context));
     }
