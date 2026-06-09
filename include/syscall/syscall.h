@@ -19,6 +19,7 @@ namespace syscall {
         ssn::SsnEntry cache[ssn::kCacheSize];
         unsigned int xor_key;
         imports::ImportEntry import_cache[imports::kImportCacheSize];
+        nt::fn_NtFreeVirtualMemory nt_free;
         bool initialized;
     };
 
@@ -52,7 +53,6 @@ namespace syscall {
         if (ctx.xor_key == 0)
             ctx.xor_key = 0xDEADBEEF;
 
-        // resolve ssns before allocation so we can patch bootstrap stubs
         ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
 
         unsigned short alloc_ssn = GetSSN(ctx, HASH_CT("NtAllocateVirtualMemory"));
@@ -62,12 +62,36 @@ namespace syscall {
         if (alloc_ssn == 0xFFFF || protect_ssn == 0xFFFF || free_ssn == 0xFFFF)
             return false;
 
+        nt::fn_NtAllocateVirtualMemory fn_alloc = nullptr;
+        nt::fn_NtProtectVirtualMemory fn_protect = nullptr;
+
+        // try bootstrap stubs first (hook-resilient, needs RWX PE section)
         bootstrap::patch_ssn(bootstrap::stub_alloc, alloc_ssn);
         bootstrap::patch_ssn(bootstrap::stub_protect, protect_ssn);
         bootstrap::patch_ssn(bootstrap::stub_free, free_ssn);
 
-        if (!stub::alloc_page(ctx.stub_page, bootstrap::get_alloc()))
-            return false;
+        if (bootstrap::stub_alloc[0] == 0x4C && bootstrap::stub_alloc[8] == 0x0F) {
+            fn_alloc = bootstrap::get_alloc();
+            if (stub::alloc_page(ctx.stub_page, fn_alloc)) {
+                fn_protect = bootstrap::get_protect();
+                ctx.nt_free = bootstrap::get_free();
+            }
+        }
+
+        // fall back to direct ntdll pointers if bootstrap failed
+        if (!ctx.stub_page.base) {
+            fn_alloc = reinterpret_cast<nt::fn_NtAllocateVirtualMemory>(
+                pe::find_export(ctx.ntdll_base, HASH_CT("NtAllocateVirtualMemory")));
+            fn_protect = reinterpret_cast<nt::fn_NtProtectVirtualMemory>(
+                pe::find_export(ctx.ntdll_base, HASH_CT("NtProtectVirtualMemory")));
+            ctx.nt_free = reinterpret_cast<nt::fn_NtFreeVirtualMemory>(
+                pe::find_export(ctx.ntdll_base, HASH_CT("NtFreeVirtualMemory")));
+
+            if (!fn_alloc || !fn_protect || !ctx.nt_free)
+                return false;
+            if (!stub::alloc_page(ctx.stub_page, fn_alloc))
+                return false;
+        }
 
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
@@ -79,7 +103,7 @@ namespace syscall {
             }
         }
 
-        if (!stub::protect_page(ctx.stub_page, bootstrap::get_protect()))
+        if (!stub::protect_page(ctx.stub_page, fn_protect))
             return false;
 
         ctx.initialized = true;
@@ -107,7 +131,8 @@ namespace syscall {
         if (!ctx.initialized)
             return;
 
-        stub::free_page(ctx.stub_page, bootstrap::get_free());
+        if (ctx.nt_free)
+            stub::free_page(ctx.stub_page, ctx.nt_free);
 
         bootstrap::patch_ssn(bootstrap::stub_alloc, 0);
         bootstrap::patch_ssn(bootstrap::stub_protect, 0);

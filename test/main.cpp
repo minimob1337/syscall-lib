@@ -110,8 +110,8 @@ int main() {
         ctx, HASH_CT("NtAllocateVirtualMemory"),
         reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
         &alloc_addr, (syscall::nt::ULONG_PTR)0, &alloc_size,
-        syscall::nt::MEM_COMMIT | syscall::nt::MEM_RESERVE,
-        syscall::nt::PAGE_READWRITE);
+        syscall::nt::kMemCommit | syscall::nt::kMemReserve,
+        syscall::nt::kPageRw);
     check(alloc_status == 0, "NtAllocateVirtualMemory succeeds");
     check(alloc_addr != nullptr, "allocated address is non-null");
 
@@ -126,16 +126,16 @@ int main() {
             ctx, HASH_CT("NtProtectVirtualMemory"),
             reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
             &protect_addr, &protect_size,
-            syscall::nt::PAGE_EXECUTE_READ, &old_protect);
+            syscall::nt::kPageExecRead, &old_protect);
         check(protect_status == 0, "NtProtectVirtualMemory succeeds");
-        check(old_protect == syscall::nt::PAGE_READWRITE, "old protect was PAGE_READWRITE");
+        check(old_protect == syscall::nt::kPageRw, "old protect was PAGE_READWRITE");
 
         syscall::nt::PVOID free_addr = alloc_addr;
         syscall::nt::SIZE_T free_size = 0;
         auto free_status = syscall::Invoke<syscall::nt::fn_NtFreeVirtualMemory>(
             ctx, HASH_CT("NtFreeVirtualMemory"),
             reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
-            &free_addr, &free_size, syscall::nt::MEM_RELEASE);
+            &free_addr, &free_size, syscall::nt::kMemRelease);
         check(free_status == 0, "NtFreeVirtualMemory succeeds");
     }
 
@@ -189,8 +189,8 @@ int main() {
             ctx2, HASH_CT("NtAllocateVirtualMemory"),
             reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
             &addr2, (syscall::nt::ULONG_PTR)0, &sz2,
-            syscall::nt::MEM_COMMIT | syscall::nt::MEM_RESERVE,
-            syscall::nt::PAGE_READWRITE);
+            syscall::nt::kMemCommit | syscall::nt::kMemReserve,
+            syscall::nt::kPageRw);
         check(st == 0, "syscall works after reinit");
         if (st == 0 && addr2) {
             syscall::nt::PVOID fa = addr2;
@@ -198,7 +198,7 @@ int main() {
             syscall::Invoke<syscall::nt::fn_NtFreeVirtualMemory>(
                 ctx2, HASH_CT("NtFreeVirtualMemory"),
                 reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
-                &fa, &fs, syscall::nt::MEM_RELEASE);
+                &fa, &fs, syscall::nt::kMemRelease);
         }
     }
     syscall::Shutdown(ctx2);

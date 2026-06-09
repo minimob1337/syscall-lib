@@ -4,7 +4,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 
 ## Features
 
-- Hook-resilient bootstrap (init never calls through ntdll, uses RWX PE section stubs)
+- Hook-resilient bootstrap on MSVC/Clang-CL (init uses RWX PE section stubs instead of calling through ntdll)
 - PEB walking to find loaded modules
 - SSN resolution via Zw* address sorting
 - Per-stub randomized junk instructions (every stub has different bytes)
@@ -17,7 +17,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 
 - Windows x64
 - C++20
-- MSVC or Clang-CL
+- MSVC, Clang-CL, or GNU (Clang/GCC)
 
 ## Usage
 
@@ -44,7 +44,7 @@ syscall::Shutdown(ctx);
 
 ## How it works
 
-1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs, patches bootstrap stubs in a small RWX PE section to allocate memory without calling through ntdll, generates a unique assembly stub for each syscall with random junk instructions, flips the stub page to `PAGE_EXECUTE_READ`
+1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs. On MSVC/Clang-CL, patches bootstrap stubs in a RWX PE section to allocate memory without ever calling through ntdll. On GNU, falls back to direct ntdll function pointers for the initial allocation. Then generates a unique assembly stub for each syscall with random junk instructions and flips the stub page to `PAGE_EXECUTE_READ`
 2. **Invoke** - looks up the SSN from the encrypted cache, finds the corresponding stub, calls it directly (the stub does `mov r10,rcx / mov eax,SSN / syscall / ret` with junk bytes mixed in)
 3. **Shutdown** - securely zeros all context memory and frees the stub page
 

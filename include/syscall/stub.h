@@ -55,10 +55,10 @@ namespace syscall::stub {
             &base_addr,
             0,
             &region_size,
-            nt::MEM_COMMIT | nt::MEM_RESERVE,
-            nt::PAGE_READWRITE);
+            nt::kMemCommit | nt::kMemReserve,
+            nt::kPageRw);
 
-        if (status != nt::STATUS_SUCCESS)
+        if (status != nt::kStatusSuccess)
             return false;
 
         page.base = static_cast<nt::BYTE*>(base_addr);
@@ -120,10 +120,10 @@ namespace syscall::stub {
             reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1)),
             &base_addr,
             &region_size,
-            nt::PAGE_EXECUTE_READ,
+            nt::kPageExecRead,
             &old_protect);
 
-        return status == nt::STATUS_SUCCESS;
+        return status == nt::kStatusSuccess;
     }
 
     SYSCALL_FORCEINLINE bool free_page(StubPage& page, nt::fn_NtFreeVirtualMemory nt_free) {
@@ -134,12 +134,12 @@ namespace syscall::stub {
             reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1)),
             &base_addr,
             &region_size,
-            nt::MEM_RELEASE);
+            nt::kMemRelease);
 
         page.base = nullptr;
         page.used = 0;
         page.capacity = 0;
-        return status == nt::STATUS_SUCCESS;
+        return status == nt::kStatusSuccess;
     }
 
     SYSCALL_FORCEINLINE nt::PVOID get_stub(const StubPage& page, unsigned short offset) {

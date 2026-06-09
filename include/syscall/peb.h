@@ -4,8 +4,8 @@
 #include "nt_defs.h"
 #include "intrinsics.h"
 
-#if defined(_MSC_VER)
-extern "C" unsigned long long __readgsqword(unsigned long long);
+#if defined(_MSC_VER) && !defined(__clang__)
+extern "C" unsigned long long __readgsqword(unsigned long);
 #pragma intrinsic(__readgsqword)
 #endif
 

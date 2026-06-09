@@ -116,15 +116,15 @@ struct IMAGE_EXPORT_DIRECTORY {
     DWORD AddressOfNameOrdinals;
 };
 
-    constexpr DWORD IMAGE_DOS_SIGNATURE = 0x5A4D;
-    constexpr DWORD IMAGE_NT_SIGNATURE = 0x00004550;
-    constexpr DWORD MEM_COMMIT = 0x00001000;
-    constexpr DWORD MEM_RESERVE = 0x00002000;
-    constexpr DWORD MEM_RELEASE = 0x00008000;
-    constexpr DWORD PAGE_READWRITE = 0x04;
-    constexpr DWORD PAGE_EXECUTE_READ = 0x20;
-    constexpr DWORD PAGE_EXECUTE_READWRITE = 0x40;
-    constexpr ULONG STATUS_SUCCESS = 0x00000000;
+    constexpr DWORD kImageDosSig = 0x5A4D;
+    constexpr DWORD kImageNtSig = 0x00004550;
+    constexpr DWORD kMemCommit = 0x00001000;
+    constexpr DWORD kMemReserve = 0x00002000;
+    constexpr DWORD kMemRelease = 0x00008000;
+    constexpr DWORD kPageRw = 0x04;
+    constexpr DWORD kPageExecRead = 0x20;
+    constexpr DWORD kPageExecRw = 0x40;
+    constexpr ULONG kStatusSuccess = 0x00000000;
 
 using fn_NtAllocateVirtualMemory = NTSTATUS(SYSCALL_CALLCONV*)(
     HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits,

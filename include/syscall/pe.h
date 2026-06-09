@@ -13,11 +13,11 @@ namespace syscall::pe {
         auto* base = static_cast<nt::BYTE*>(module_base);
 
         auto* dos = reinterpret_cast<nt::IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != nt::IMAGE_DOS_SIGNATURE)
+        if (dos->e_magic != nt::kImageDosSig)
             return nullptr;
 
         auto* nt_hdrs = reinterpret_cast<nt::IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        if (nt_hdrs->Signature != nt::IMAGE_NT_SIGNATURE)
+        if (nt_hdrs->Signature != nt::kImageNtSig)
             return nullptr;
 
         nt::DWORD export_rva = nt_hdrs->OptionalHeader.DataDirectory[0].VirtualAddress;
@@ -54,11 +54,11 @@ namespace syscall::pe {
         auto* base = static_cast<nt::BYTE*>(module_base);
 
         auto* dos = reinterpret_cast<nt::IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != nt::IMAGE_DOS_SIGNATURE)
+        if (dos->e_magic != nt::kImageDosSig)
             return nullptr;
 
         auto* nt_hdr = reinterpret_cast<nt::IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        if (nt_hdr->Signature != nt::IMAGE_NT_SIGNATURE)
+        if (nt_hdr->Signature != nt::kImageNtSig)
             return nullptr;
 
         nt::DWORD export_dir_rva = nt_hdr->OptionalHeader.DataDirectory[0].VirtualAddress;
