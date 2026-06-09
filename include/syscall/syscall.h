@@ -82,8 +82,10 @@ namespace syscall {
 
     template<typename Fn, typename... Args>
     SYSCALL_FORCEINLINE auto Invoke(const Context& ctx, unsigned int nt_hash, Args... args) {
-        auto fn = reinterpret_cast<Fn>(GetStub(ctx, nt_hash));
-        return fn(args...);
+        auto stub = GetStub(ctx, nt_hash);
+        if (!stub)
+            return static_cast<decltype(reinterpret_cast<Fn>(stub)(args...))>(0xC0000001);
+        return reinterpret_cast<Fn>(stub)(args...);
     }
 
     SYSCALL_FORCEINLINE void Shutdown(Context& ctx) {

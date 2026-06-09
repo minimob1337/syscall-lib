@@ -22,6 +22,7 @@ namespace syscall::ssn {
     constexpr unsigned int kMaxSyscalls = 1024;
     constexpr unsigned int kCacheSize = 1024;
     constexpr unsigned short kMaxSsn = 2048;
+    static_assert((kCacheSize & (kCacheSize - 1)) == 0, "cache size must be power of 2");
 
     // hash Zw name as if it started with "Nt" instead
     SYSCALL_FORCEINLINE unsigned int hash_zw_as_nt(const char* zw_name) {
@@ -81,9 +82,14 @@ namespace syscall::ssn {
 
             unsigned int nt_hash = zw_entries[i].nt_hash;
             unsigned int slot = nt_hash & (cache_capacity - 1);
+            unsigned int probes = 0;
 
-            while (cache[slot].hash != 0)
+            while (cache[slot].hash != 0 && probes < cache_capacity) {
                 slot = (slot + 1) & (cache_capacity - 1);
+                ++probes;
+            }
+            if (probes >= cache_capacity)
+                continue;
 
             cache[slot].hash = nt_hash ^ xor_key;
             cache[slot].ssn = static_cast<unsigned short>(i) ^ static_cast<unsigned short>(xor_key);
@@ -97,11 +103,13 @@ namespace syscall::ssn {
 
     SYSCALL_FORCEINLINE SsnEntry* lookup(SsnEntry* cache, unsigned int cache_capacity, unsigned int nt_hash, unsigned int xor_key) {
         unsigned int slot = nt_hash & (cache_capacity - 1);
+        unsigned int probes = 0;
 
-        while (cache[slot].hash != 0) {
+        while (cache[slot].hash != 0 && probes < cache_capacity) {
             if (cache[slot].hash == (nt_hash ^ xor_key))
                 return &cache[slot];
             slot = (slot + 1) & (cache_capacity - 1);
+            ++probes;
         }
 
         return nullptr;
