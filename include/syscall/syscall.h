@@ -7,6 +7,7 @@
 #include "pe.h"
 #include "ssn.h"
 #include "stub.h"
+#include "prng.h"
 
 namespace syscall {
 
@@ -40,9 +41,12 @@ namespace syscall {
 
         ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize);
 
+        prng::State rng{};
+        prng::seed(rng);
+
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
-                unsigned short offset = stub::write_stub(ctx.stub_page, ctx.cache[i].ssn);
+                unsigned short offset = stub::write_stub(ctx.stub_page, ctx.cache[i].ssn, rng);
                 ctx.cache[i].stub_offset = offset;
             }
         }

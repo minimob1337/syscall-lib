@@ -37,6 +37,24 @@ int main() {
             printf("  %-30s NOT FOUND\n", t.name);
     }
 
+    printf("\n--- stub hex dump ---\n");
+    struct { const char* name; unsigned int hash; } dump_targets[] = {
+        { "NtAllocateVirtualMemory", HASH_CT("NtAllocateVirtualMemory") },
+        { "NtClose",                 HASH_CT("NtClose")                 },
+    };
+    for (auto& t : dump_targets) {
+        auto* stub_ptr = static_cast<unsigned char*>(syscall::GetStub(ctx, t.hash));
+        if (stub_ptr) {
+            printf("  %s:\n    ", t.name);
+            for (int b = 0; b < 64; ++b) {
+                printf("%02X ", stub_ptr[b]);
+                if ((b + 1) % 16 == 0 && b < 63)
+                    printf("\n    ");
+            }
+            printf("\n");
+        }
+    }
+
     printf("\n--- NtAllocateVirtualMemory ---\n");
     void* alloc_addr = nullptr;
     syscall::nt::SIZE_T alloc_size = 0x1000;

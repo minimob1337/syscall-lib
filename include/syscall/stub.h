@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nt_defs.h"
+#include "prng.h"
 
 namespace syscall::stub {
 
@@ -10,10 +11,39 @@ namespace syscall::stub {
         unsigned int capacity;
     };
 
-    constexpr unsigned int kStubSize = 16;
+    constexpr unsigned int kStubSize = 64;
     constexpr unsigned int kPageSize = 4096;
-    // 2 pages, enough for ~500 syscalls
-    constexpr unsigned int kStubRegionSize = kPageSize * 2;
+    // 16 pages, enough for 500+ randomized stubs
+    constexpr unsigned int kStubRegionSize = kPageSize * 16;
+
+    struct JunkInsn {
+        nt::BYTE bytes[4];
+        unsigned char len;
+    };
+
+    constexpr unsigned int kJunkTableSize = 7;
+    constexpr JunkInsn kJunkTable[kJunkTableSize] = {
+        {{0x90, 0x00, 0x00, 0x00}, 1},             // nop
+        {{0x66, 0x90, 0x00, 0x00}, 2},             // 2-byte nop
+        {{0x0F, 0x1F, 0x00, 0x00}, 3},             // 3-byte nop
+        {{0x0F, 0x1F, 0x40, 0x00}, 4},             // 4-byte nop
+        {{0x48, 0x87, 0xDB, 0x00}, 3},             // xchg rbx, rbx
+        {{0x48, 0x87, 0xF6, 0x00}, 3},             // xchg rsi, rsi
+        {{0x48, 0x87, 0xFF, 0x00}, 3},             // xchg rdi, rdi
+    };
+
+    // writes 0-3 random junk instructions, returns bytes written
+    SYSCALL_FORCEINLINE unsigned int write_junk(nt::BYTE* dst, prng::State& rng) {
+        unsigned int count = prng::next_range(rng, 4);
+        unsigned int written = 0;
+
+        for (unsigned int i = 0; i < count; ++i) {
+            unsigned int idx = prng::next_range(rng, kJunkTableSize);
+            for (unsigned char b = 0; b < kJunkTable[idx].len; ++b)
+                dst[written++] = kJunkTable[idx].bytes[b];
+        }
+        return written;
+    }
 
     SYSCALL_FORCEINLINE bool alloc_page(StubPage& page, nt::fn_NtAllocateVirtualMemory nt_alloc) {
         nt::PVOID base_addr = nullptr;
@@ -36,34 +66,44 @@ namespace syscall::stub {
         return true;
     }
 
-    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn) {
+    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn, prng::State& rng) {
         if (page.used + kStubSize > page.capacity)
             return 0xFFFF;
 
         nt::BYTE* dst = page.base + page.used;
+        unsigned int pos = 0;
 
+        // junk before mov r10, rcx
+        pos += write_junk(dst + pos, rng);
 
-        dst[0] = 0x4C;
-        dst[1] = 0x8B;
-        dst[2] = 0xD1;
+        // mov r10, rcx
+        dst[pos++] = 0x4C;
+        dst[pos++] = 0x8B;
+        dst[pos++] = 0xD1;
 
-        dst[3] = 0xB8;
-        dst[4] = static_cast<nt::BYTE>(ssn & 0xFF);
-        dst[5] = static_cast<nt::BYTE>((ssn >> 8) & 0xFF);
-        dst[6] = 0x00;
-        dst[7] = 0x00;
+        // junk before mov eax, ssn
+        pos += write_junk(dst + pos, rng);
 
-        dst[8] = 0x0F;
-        dst[9] = 0x05;
+        // mov eax, SSN
+        dst[pos++] = 0xB8;
+        dst[pos++] = static_cast<nt::BYTE>(ssn & 0xFF);
+        dst[pos++] = static_cast<nt::BYTE>((ssn >> 8) & 0xFF);
+        dst[pos++] = 0x00;
+        dst[pos++] = 0x00;
 
-        dst[10] = 0xC3;
+        // junk before syscall
+        pos += write_junk(dst + pos, rng);
+
+        // syscall
+        dst[pos++] = 0x0F;
+        dst[pos++] = 0x05;
+
+        // ret
+        dst[pos++] = 0xC3;
 
         // int3 padding
-        dst[11] = 0xCC;
-        dst[12] = 0xCC;
-        dst[13] = 0xCC;
-        dst[14] = 0xCC;
-        dst[15] = 0xCC;
+        while (pos < kStubSize)
+            dst[pos++] = 0xCC;
 
         unsigned short offset = static_cast<unsigned short>(page.used);
         page.used += kStubSize;
