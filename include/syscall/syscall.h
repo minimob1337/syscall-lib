@@ -9,6 +9,7 @@
 #include "stub.h"
 #include "prng.h"
 #include "dynamic_import.h"
+#include "bootstrap.h"
 
 namespace syscall {
 
@@ -16,56 +17,10 @@ namespace syscall {
         nt::PVOID ntdll_base;
         stub::StubPage stub_page;
         ssn::SsnEntry cache[ssn::kCacheSize];
-        nt::fn_NtFreeVirtualMemory nt_free;
         unsigned int xor_key;
         imports::ImportEntry import_cache[imports::kImportCacheSize];
         bool initialized;
     };
-
-    SYSCALL_FORCEINLINE bool Init(Context& ctx) {
-        intrinsics::mem_set(&ctx, 0, sizeof(Context));
-
-        ctx.ntdll_base = peb::find_module(HASH_CT(L"ntdll.dll"));
-        if (!ctx.ntdll_base)
-            return false;
-
-        auto nt_alloc = reinterpret_cast<nt::fn_NtAllocateVirtualMemory>(
-            pe::find_export(ctx.ntdll_base, HASH_CT("NtAllocateVirtualMemory")));
-        auto nt_protect = reinterpret_cast<nt::fn_NtProtectVirtualMemory>(
-            pe::find_export(ctx.ntdll_base, HASH_CT("NtProtectVirtualMemory")));
-        ctx.nt_free = reinterpret_cast<nt::fn_NtFreeVirtualMemory>(
-            pe::find_export(ctx.ntdll_base, HASH_CT("NtFreeVirtualMemory")));
-
-        if (!nt_alloc || !nt_protect || !ctx.nt_free)
-            return false;
-
-        if (!stub::alloc_page(ctx.stub_page, nt_alloc))
-            return false;
-
-        prng::State rng{};
-        prng::seed(rng);
-        ctx.xor_key = prng::next(rng);
-        if (ctx.xor_key == 0)
-            ctx.xor_key = 0xDEADBEEF;
-
-        ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
-
-        for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
-            if (ctx.cache[i].hash != 0) {
-                unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
-                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng);
-                if (offset == 0xFFFF)
-                    break;
-                ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
-            }
-        }
-
-        if (!stub::protect_page(ctx.stub_page, nt_protect))
-            return false;
-
-        ctx.initialized = true;
-        return true;
-    }
 
     SYSCALL_FORCEINLINE nt::PVOID GetStub(const Context& ctx, unsigned int nt_hash) {
         auto* entry = ssn::lookup(
@@ -82,6 +37,53 @@ namespace syscall {
         if (!entry)
             return 0xFFFF;
         return ssn::decrypt_ssn(entry, ctx.xor_key);
+    }
+
+    SYSCALL_FORCEINLINE bool Init(Context& ctx) {
+        intrinsics::mem_set(&ctx, 0, sizeof(Context));
+
+        ctx.ntdll_base = peb::find_module(HASH_CT(L"ntdll.dll"));
+        if (!ctx.ntdll_base)
+            return false;
+
+        prng::State rng{};
+        prng::seed(rng);
+        ctx.xor_key = prng::next(rng);
+        if (ctx.xor_key == 0)
+            ctx.xor_key = 0xDEADBEEF;
+
+        // resolve ssns before allocation so we can patch bootstrap stubs
+        ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
+
+        unsigned short alloc_ssn = GetSSN(ctx, HASH_CT("NtAllocateVirtualMemory"));
+        unsigned short protect_ssn = GetSSN(ctx, HASH_CT("NtProtectVirtualMemory"));
+        unsigned short free_ssn = GetSSN(ctx, HASH_CT("NtFreeVirtualMemory"));
+
+        if (alloc_ssn == 0xFFFF || protect_ssn == 0xFFFF || free_ssn == 0xFFFF)
+            return false;
+
+        bootstrap::patch_ssn(bootstrap::stub_alloc, alloc_ssn);
+        bootstrap::patch_ssn(bootstrap::stub_protect, protect_ssn);
+        bootstrap::patch_ssn(bootstrap::stub_free, free_ssn);
+
+        if (!stub::alloc_page(ctx.stub_page, bootstrap::get_alloc()))
+            return false;
+
+        for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
+            if (ctx.cache[i].hash != 0) {
+                unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
+                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng);
+                if (offset == 0xFFFF)
+                    break;
+                ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
+            }
+        }
+
+        if (!stub::protect_page(ctx.stub_page, bootstrap::get_protect()))
+            return false;
+
+        ctx.initialized = true;
+        return true;
     }
 
     template<typename Fn, typename... Args>
@@ -105,8 +107,11 @@ namespace syscall {
         if (!ctx.initialized)
             return;
 
-        if (ctx.nt_free)
-            stub::free_page(ctx.stub_page, ctx.nt_free);
+        stub::free_page(ctx.stub_page, bootstrap::get_free());
+
+        bootstrap::patch_ssn(bootstrap::stub_alloc, 0);
+        bootstrap::patch_ssn(bootstrap::stub_protect, 0);
+        bootstrap::patch_ssn(bootstrap::stub_free, 0);
 
         intrinsics::secure_zero(&ctx, sizeof(Context));
     }
