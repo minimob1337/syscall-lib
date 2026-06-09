@@ -8,7 +8,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 - SEC_NO_CHANGE stub page (mapped via NtCreateSection, EDR cannot change protection after creation)
 - Hook-resilient bootstrap on all compilers (init uses RWX PE section stubs instead of calling through ntdll)
 - PEB walking to find loaded modules
-- SSN resolution via Zw* address sorting
+- SSN resolution via Zw* address sorting with Halo's Gate verification (recovers correct SSNs from hooked stubs)
 - Per-stub randomized junk instructions (every stub has different bytes)
 - XOR-encrypted SSN cache
 - Forwarded export resolution (follows `kernel32 -> ntdll` chains)

@@ -123,4 +123,148 @@ namespace syscall::ssn {
         return entry->stub_offset ^ static_cast<unsigned short>(xor_key >> 16);
     }
 
+    // x64 ntdll stub stride in bytes
+    constexpr unsigned int kStubStride = 0x20;
+    // max neighbor distance to search in each direction
+    constexpr unsigned int kMaxNeighborSearch = 20;
+
+    // check if a syscall stub prologue is hooked
+    SYSCALL_FORCEINLINE bool is_stub_hooked(const nt::BYTE* addr) {
+        const nt::BYTE* p = addr;
+
+        // skip leading nops
+        while (*p == 0x90)
+            ++p;
+
+        // known hook signatures
+        if (p[0] == 0xE9)              return true;  // jmp rel32
+        if (p[0] == 0xEB)              return true;  // jmp rel8
+        if (p[0] == 0xFF && p[1] == 0x25) return true;  // jmp [rip+disp32]
+        if (p[0] == 0xCC)              return true;  // int3
+        if (p[0] == 0x0F && p[1] == 0x0B) return true;  // ud2
+        if (p[0] == 0xCD && p[1] == 0x03) return true;  // int 3 (alt)
+        if (p[0] == 0x68)              return true;  // push imm32
+
+        // intact prologue: 4C 8B D1 B8
+        if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0xD1 && p[3] == 0xB8)
+            return false;
+
+        // anything else we don't recognize, treat as hooked
+        return true;
+    }
+
+    // read ssn from an unhooked stub (assumes 4C 8B D1 B8 xx xx 00 00)
+    SYSCALL_FORCEINLINE unsigned short read_stub_ssn(const nt::BYTE* addr) {
+        const nt::BYTE* p = addr;
+        while (*p == 0x90)
+            ++p;
+        // ssn is the two bytes after 4C 8B D1 B8
+        return static_cast<unsigned short>(p[4]) |
+               (static_cast<unsigned short>(p[5]) << 8);
+    }
+
+    // walk neighbors to recover ssn from a hooked stub via halo's gate
+    SYSCALL_FORCEINLINE bool recover_ssn_from_neighbors(const nt::BYTE* stub_addr, unsigned short& out_ssn) {
+        // search upward (lower addresses) and downward (higher addresses)
+        for (unsigned int dist = 1; dist <= kMaxNeighborSearch; ++dist) {
+            // check neighbor above
+            const nt::BYTE* up = stub_addr - (dist * kStubStride);
+            if (!is_stub_hooked(up)) {
+                unsigned short neighbor_ssn = read_stub_ssn(up);
+                out_ssn = static_cast<unsigned short>(neighbor_ssn + dist);
+                return true;
+            }
+
+            // check neighbor below
+            const nt::BYTE* down = stub_addr + (dist * kStubStride);
+            if (!is_stub_hooked(down)) {
+                unsigned short neighbor_ssn = read_stub_ssn(down);
+                out_ssn = static_cast<unsigned short>(neighbor_ssn - dist);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // verify and fix ssns using halo's gate after zw sorting
+    SYSCALL_FORCEINLINE unsigned int verify_ssns(nt::PVOID ntdll_base, SsnEntry* cache, unsigned int cache_capacity, unsigned int xor_key) {
+        auto* base = static_cast<nt::BYTE*>(ntdll_base);
+        auto* exports = pe::get_export_dir(ntdll_base);
+        if (!exports)
+            return 0;
+
+        auto* names = reinterpret_cast<nt::DWORD*>(base + exports->AddressOfNames);
+        auto* ordinals = reinterpret_cast<nt::WORD*>(base + exports->AddressOfNameOrdinals);
+        auto* functions = reinterpret_cast<nt::DWORD*>(base + exports->AddressOfFunctions);
+
+        nt::DWORD export_dir_rva = 0;
+        nt::DWORD export_dir_size = 0;
+        {
+            auto* dos = reinterpret_cast<nt::IMAGE_DOS_HEADER*>(base);
+            auto* nt_hdr = reinterpret_cast<nt::IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            export_dir_rva = nt_hdr->OptionalHeader.DataDirectory[0].VirtualAddress;
+            export_dir_size = nt_hdr->OptionalHeader.DataDirectory[0].Size;
+        }
+
+        unsigned int fixed = 0;
+
+        // walk all exports and match against cache entries by hash
+        for (nt::DWORD i = 0; i < exports->NumberOfNames; ++i) {
+            auto* name = reinterpret_cast<const char*>(base + names[i]);
+
+            // only check Nt* syscall stubs
+            if (name[0] != 'N' || name[1] != 't')
+                continue;
+
+            unsigned int nt_hash = hash::fnv1a_rt(name);
+            unsigned int slot = nt_hash & (cache_capacity - 1);
+            unsigned int probes = 0;
+            SsnEntry* entry = nullptr;
+
+            while (cache[slot].hash != 0 && probes < cache_capacity) {
+                if (cache[slot].hash == (nt_hash ^ xor_key)) {
+                    entry = &cache[slot];
+                    break;
+                }
+                slot = (slot + 1) & (cache_capacity - 1);
+                ++probes;
+            }
+
+            if (!entry)
+                continue;
+
+            // resolve the actual function address
+            nt::DWORD func_rva = functions[ordinals[i]];
+
+            // skip forwarded exports
+            if (func_rva >= export_dir_rva && func_rva < export_dir_rva + export_dir_size)
+                continue;
+
+            auto* stub_addr = base + func_rva;
+
+            if (!is_stub_hooked(stub_addr)) {
+                // verify ssn matches
+                unsigned short stub_ssn = read_stub_ssn(stub_addr);
+                unsigned short cached_ssn = decrypt_ssn(entry, xor_key);
+                if (stub_ssn != cached_ssn) {
+                    // stub disagrees with zw sorting, trust the stub bytes
+                    entry->ssn = stub_ssn ^ static_cast<unsigned short>(xor_key);
+                    ++fixed;
+                }
+            } else {
+                // stub is hooked, recover via neighbor walking
+                unsigned short recovered_ssn = 0;
+                if (recover_ssn_from_neighbors(stub_addr, recovered_ssn)) {
+                    unsigned short cached_ssn = decrypt_ssn(entry, xor_key);
+                    if (recovered_ssn != cached_ssn) {
+                        entry->ssn = recovered_ssn ^ static_cast<unsigned short>(xor_key);
+                        ++fixed;
+                    }
+                }
+            }
+        }
+
+        return fixed;
+    }
+
 } // namespace syscall::ssn

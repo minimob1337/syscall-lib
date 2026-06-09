@@ -54,6 +54,7 @@ namespace syscall {
             ctx.xor_key = 0xDEADBEEF;
 
         ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
+        ssn::verify_ssns(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
 
         unsigned short create_ssn = GetSSN(ctx, HASH_CT("NtCreateSection"));
         unsigned short map_ssn = GetSSN(ctx, HASH_CT("NtMapViewOfSection"));

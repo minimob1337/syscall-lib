@@ -124,6 +124,34 @@ int main() {
         check(has_jmp, "stub uses indirect jmp (no inline syscall)");
     }
 
+    printf("\n[hook detection]\n");
+    {
+        // get ntdll address of NtClose
+        auto* ntclose_addr = static_cast<unsigned char*>(
+            syscall::pe::find_export(ctx.ntdll_base, HASH_CT("NtClose")));
+        check(ntclose_addr != nullptr, "NtClose export resolved");
+        if (ntclose_addr) {
+            // verify unhooked prologue: 4C 8B D1 B8
+            bool prologue_ok = (ntclose_addr[0] == 0x4C && ntclose_addr[1] == 0x8B &&
+                                ntclose_addr[2] == 0xD1 && ntclose_addr[3] == 0xB8);
+            check(prologue_ok, "NtClose has intact prologue (4C 8B D1 B8)");
+
+            if (prologue_ok) {
+                // read ssn from stub bytes
+                unsigned short stub_ssn = static_cast<unsigned short>(ntclose_addr[4]) |
+                    (static_cast<unsigned short>(ntclose_addr[5]) << 8);
+                unsigned short cached_ssn = syscall::GetSSN(ctx, HASH_CT("NtClose"));
+                char buf[80];
+                snprintf(buf, sizeof(buf), "NtClose stub SSN (0x%04X) matches cached SSN (0x%04X)",
+                    stub_ssn, cached_ssn);
+                check(stub_ssn == cached_ssn, buf);
+            }
+
+            // verify hook detection identifies it as clean
+            check(!syscall::ssn::is_stub_hooked(ntclose_addr), "NtClose detected as unhooked");
+        }
+    }
+
     printf("\n[cache encryption]\n");
     unsigned int target_hash = HASH_CT("NtAllocateVirtualMemory");
     bool found_plaintext = false;
