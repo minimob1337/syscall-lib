@@ -24,9 +24,10 @@ namespace syscall::bootstrap {
         0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, \
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
 
-    BSTUB_SECTION static unsigned char stub_alloc[22]   = BOOTSTRAP_STUB;
-    BSTUB_SECTION static unsigned char stub_protect[22] = BOOTSTRAP_STUB;
-    BSTUB_SECTION static unsigned char stub_free[22]    = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_create_section[22] = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_map_view[22]       = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_unmap_view[22]     = BOOTSTRAP_STUB;
+    BSTUB_SECTION static unsigned char stub_close[22]          = BOOTSTRAP_STUB;
 
     #undef BOOTSTRAP_STUB
     #undef BSTUB_SECTION
@@ -43,16 +44,20 @@ namespace syscall::bootstrap {
             p[i] = static_cast<unsigned char>(addr >> (i * 8));
     }
 
-    SYSCALL_FORCEINLINE nt::fn_NtAllocateVirtualMemory get_alloc() {
-        return reinterpret_cast<nt::fn_NtAllocateVirtualMemory>(static_cast<nt::PVOID>(stub_alloc));
+    SYSCALL_FORCEINLINE nt::fn_NtCreateSection get_create_section() {
+        return reinterpret_cast<nt::fn_NtCreateSection>(static_cast<nt::PVOID>(stub_create_section));
     }
 
-    SYSCALL_FORCEINLINE nt::fn_NtProtectVirtualMemory get_protect() {
-        return reinterpret_cast<nt::fn_NtProtectVirtualMemory>(static_cast<nt::PVOID>(stub_protect));
+    SYSCALL_FORCEINLINE nt::fn_NtMapViewOfSection get_map_view() {
+        return reinterpret_cast<nt::fn_NtMapViewOfSection>(static_cast<nt::PVOID>(stub_map_view));
     }
 
-    SYSCALL_FORCEINLINE nt::fn_NtFreeVirtualMemory get_free() {
-        return reinterpret_cast<nt::fn_NtFreeVirtualMemory>(static_cast<nt::PVOID>(stub_free));
+    SYSCALL_FORCEINLINE nt::fn_NtUnmapViewOfSection get_unmap_view() {
+        return reinterpret_cast<nt::fn_NtUnmapViewOfSection>(static_cast<nt::PVOID>(stub_unmap_view));
+    }
+
+    SYSCALL_FORCEINLINE nt::fn_NtClose get_close() {
+        return reinterpret_cast<nt::fn_NtClose>(static_cast<nt::PVOID>(stub_close));
     }
 
 } // namespace syscall::bootstrap

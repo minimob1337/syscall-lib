@@ -116,6 +116,11 @@ struct IMAGE_EXPORT_DIRECTORY {
     DWORD AddressOfNameOrdinals;
 };
 
+    union LARGE_INTEGER {
+        struct { ULONG LowPart; LONG HighPart; } u;
+        long long QuadPart;
+    };
+
     constexpr DWORD kImageDosSig = 0x5A4D;
     constexpr DWORD kImageNtSig = 0x00004550;
     constexpr DWORD kMemCommit = 0x00001000;
@@ -125,6 +130,10 @@ struct IMAGE_EXPORT_DIRECTORY {
     constexpr DWORD kPageExecRead = 0x20;
     constexpr DWORD kPageExecRw = 0x40;
     constexpr ULONG kStatusSuccess = 0x00000000;
+    constexpr ULONG kSecNoChange = 0x00400000;
+    constexpr ULONG kSecCommit = 0x08000000;
+    constexpr ULONG kSectionAllAccess = 0x000F001F;
+    constexpr ULONG kViewUnmap = 2;
 
 using fn_NtAllocateVirtualMemory = NTSTATUS(SYSCALL_CALLCONV*)(
     HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits,
@@ -136,5 +145,21 @@ using fn_NtProtectVirtualMemory = NTSTATUS(SYSCALL_CALLCONV*)(
 
 using fn_NtFreeVirtualMemory = NTSTATUS(SYSCALL_CALLCONV*)(
     HANDLE ProcessHandle, PVOID* BaseAddress, SIZE_T* RegionSize, ULONG FreeType);
+
+using fn_NtCreateSection = NTSTATUS(SYSCALL_CALLCONV*)(
+    HANDLE* SectionHandle, ULONG DesiredAccess, PVOID ObjectAttributes,
+    LARGE_INTEGER* MaximumSize, ULONG SectionPageProtection,
+    ULONG AllocationAttributes, HANDLE FileHandle);
+
+using fn_NtMapViewOfSection = NTSTATUS(SYSCALL_CALLCONV*)(
+    HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress,
+    ULONG_PTR ZeroBits, SIZE_T CommitSize, LARGE_INTEGER* SectionOffset,
+    SIZE_T* ViewSize, ULONG InheritDisposition, ULONG AllocationType,
+    ULONG Win32Protect);
+
+using fn_NtUnmapViewOfSection = NTSTATUS(SYSCALL_CALLCONV*)(
+    HANDLE ProcessHandle, PVOID BaseAddress);
+
+using fn_NtClose = NTSTATUS(SYSCALL_CALLCONV*)(HANDLE Handle);
 
 } // namespace syscall::nt

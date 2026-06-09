@@ -46,24 +46,103 @@ namespace syscall::stub {
         return written;
     }
 
-    SYSCALL_FORCEINLINE bool alloc_page(StubPage& page, nt::fn_NtAllocateVirtualMemory nt_alloc) {
-        nt::PVOID base_addr = nullptr;
-        nt::SIZE_T region_size = kStubRegionSize;
+    // create section and map RW view for writing stubs
+    SYSCALL_FORCEINLINE bool alloc_page(
+        StubPage& page,
+        nt::HANDLE& section_handle_out,
+        nt::fn_NtCreateSection fn_create,
+        nt::fn_NtMapViewOfSection fn_map,
+        nt::fn_NtClose fn_close)
+    {
+        nt::HANDLE current_process = reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1));
 
-        nt::NTSTATUS status = nt_alloc(
-            reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1)),
-            &base_addr,
-            0,
-            &region_size,
-            nt::kMemCommit | nt::kMemReserve,
-            nt::kPageRw);
+        // create a section backed by the pagefile
+        nt::LARGE_INTEGER section_size{};
+        section_size.QuadPart = kStubRegionSize;
+        section_handle_out = nullptr;
+
+        nt::NTSTATUS status = fn_create(
+            &section_handle_out,
+            nt::kSectionAllAccess,
+            nullptr,
+            &section_size,
+            nt::kPageExecRw,
+            nt::kSecCommit | nt::kSecNoChange,
+            nullptr);
 
         if (status != nt::kStatusSuccess)
             return false;
 
-        page.base = static_cast<nt::BYTE*>(base_addr);
+        // map RW view for writing stubs
+        nt::PVOID rw_base = nullptr;
+        nt::SIZE_T view_size = 0;
+
+        status = fn_map(
+            section_handle_out,
+            current_process,
+            &rw_base,
+            0,
+            0,
+            nullptr,
+            &view_size,
+            nt::kViewUnmap,
+            0,
+            nt::kPageRw);
+
+        if (status != nt::kStatusSuccess) {
+            fn_close(section_handle_out);
+            return false;
+        }
+
+        page.base = static_cast<nt::BYTE*>(rw_base);
         page.used = 0;
         page.capacity = kStubRegionSize;
+
+        return true;
+    }
+
+    // unmap RW view and remap as RX with SEC_NO_CHANGE
+    SYSCALL_FORCEINLINE bool finalize_page(
+        StubPage& page,
+        nt::HANDLE section_handle,
+        nt::fn_NtMapViewOfSection fn_map,
+        nt::fn_NtUnmapViewOfSection fn_unmap,
+        nt::fn_NtClose fn_close)
+    {
+        nt::HANDLE current_process = reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1));
+
+        // unmap the RW view
+        nt::NTSTATUS status = fn_unmap(current_process, page.base);
+        if (status != nt::kStatusSuccess) {
+            fn_close(section_handle);
+            return false;
+        }
+
+        // remap as RX, edr cannot change protection on this view
+        nt::PVOID rx_base = nullptr;
+        nt::SIZE_T view_size = 0;
+
+        status = fn_map(
+            section_handle,
+            current_process,
+            &rx_base,
+            0,
+            0,
+            nullptr,
+            &view_size,
+            nt::kViewUnmap,
+            0,
+            nt::kPageExecRead);
+
+        // close the section handle, view stays mapped
+        fn_close(section_handle);
+
+        if (status != nt::kStatusSuccess) {
+            page.base = nullptr;
+            return false;
+        }
+
+        page.base = static_cast<nt::BYTE*>(rx_base);
         return true;
     }
 
@@ -114,30 +193,10 @@ namespace syscall::stub {
         return offset;
     }
 
-    SYSCALL_FORCEINLINE bool protect_page(StubPage& page, nt::fn_NtProtectVirtualMemory nt_protect) {
-        nt::PVOID base_addr = page.base;
-        nt::SIZE_T region_size = page.capacity;
-        nt::ULONG old_protect = 0;
+    SYSCALL_FORCEINLINE bool free_page(StubPage& page, nt::fn_NtUnmapViewOfSection fn_unmap) {
+        nt::HANDLE current_process = reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1));
 
-        nt::NTSTATUS status = nt_protect(
-            reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1)),
-            &base_addr,
-            &region_size,
-            nt::kPageExecRead,
-            &old_protect);
-
-        return status == nt::kStatusSuccess;
-    }
-
-    SYSCALL_FORCEINLINE bool free_page(StubPage& page, nt::fn_NtFreeVirtualMemory nt_free) {
-        nt::PVOID base_addr = page.base;
-        nt::SIZE_T region_size = 0;
-
-        nt::NTSTATUS status = nt_free(
-            reinterpret_cast<nt::HANDLE>(static_cast<long long>(-1)),
-            &base_addr,
-            &region_size,
-            nt::kMemRelease);
+        nt::NTSTATUS status = fn_unmap(current_process, page.base);
 
         page.base = nullptr;
         page.used = 0;

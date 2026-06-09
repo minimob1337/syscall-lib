@@ -87,6 +87,21 @@ int main() {
         printf("  (protect = 0x%02X)\n", mbi.Protect);
     }
 
+    printf("\n[sec_no_change]\n");
+    {
+        // verify that NtProtectVirtualMemory fails on the stub page
+        syscall::nt::PVOID protect_base = ctx.stub_page.base;
+        syscall::nt::SIZE_T protect_size = 0x1000;
+        syscall::nt::ULONG old_prot = 0;
+        auto prot_status = syscall::Invoke<syscall::nt::fn_NtProtectVirtualMemory>(
+            ctx, HASH_CT("NtProtectVirtualMemory"),
+            reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
+            &protect_base, &protect_size,
+            syscall::nt::kPageExecRw, &old_prot);
+        check(prot_status != 0, "NtProtectVirtualMemory fails on stub page (SEC_NO_CHANGE)");
+        printf("  (status = 0x%08lX)\n", static_cast<unsigned long>(prot_status));
+    }
+
     printf("\n[indirect syscall]\n");
     auto* gadget = static_cast<unsigned char*>(syscall::pe::find_syscall_ret(ctx.ntdll_base));
     auto* ntdll = static_cast<unsigned char*>(ctx.ntdll_base);

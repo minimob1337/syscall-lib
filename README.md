@@ -5,6 +5,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 ## Features
 
 - Indirect syscalls via ntdll gadget (return address points into ntdll, clean stack for instrumentation callbacks)
+- SEC_NO_CHANGE stub page (mapped via NtCreateSection, EDR cannot change protection after creation)
 - Hook-resilient bootstrap on all compilers (init uses RWX PE section stubs instead of calling through ntdll)
 - PEB walking to find loaded modules
 - SSN resolution via Zw* address sorting
@@ -45,7 +46,7 @@ syscall::Shutdown(ctx);
 
 ## How it works
 
-1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs. Patches bootstrap stubs in a RWX PE section to allocate memory without ever calling through ntdll (MSVC uses linker pragma, GNU uses inline asm `.section` flags). Falls back to direct ntdll function pointers if the RWX section fails. Then generates a unique assembly stub for each syscall with random junk instructions and flips the stub page to `PAGE_EXECUTE_READ`
+1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs. Patches bootstrap stubs in a RWX PE section to create a section and map views without ever calling through ntdll (MSVC uses linker pragma, GNU uses inline asm `.section` flags). Falls back to direct ntdll function pointers if the RWX section fails. Creates a pagefile-backed section with `SEC_NO_CHANGE`, maps a writable view to generate unique assembly stubs with random junk instructions, then remaps as `PAGE_EXECUTE_READ`. The `SEC_NO_CHANGE` flag prevents any protection changes after mapping
 2. **Invoke** - looks up the SSN from the encrypted cache, finds the corresponding stub, calls it directly (the stub does `mov r10,rcx / mov eax,SSN / jmp ntdll_gadget` with junk bytes mixed in, the `syscall; ret` executes from inside ntdll)
 3. **Shutdown** - securely zeros all context memory and frees the stub page
 
