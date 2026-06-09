@@ -62,4 +62,11 @@ namespace syscall::intrinsics {
         return static_cast<unsigned char>(*a) - static_cast<unsigned char>(*b);
     }
 
+    // volatile prevents compiler from optimizing this out
+    SYSCALL_FORCEINLINE void secure_zero(void* dst, unsigned long long n) {
+        volatile unsigned char* p = static_cast<volatile unsigned char*>(dst);
+        for (unsigned long long i = 0; i < n; ++i)
+            p[i] = 0;
+    }
+
 } // namespace syscall::intrinsics

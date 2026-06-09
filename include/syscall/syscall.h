@@ -16,6 +16,7 @@ namespace syscall {
         stub::StubPage stub_page;
         ssn::SsnEntry cache[ssn::kCacheSize];
         nt::fn_NtFreeVirtualMemory nt_free;
+        unsigned int xor_key;
         bool initialized;
     };
 
@@ -39,15 +40,19 @@ namespace syscall {
         if (!stub::alloc_page(ctx.stub_page, nt_alloc))
             return false;
 
-        ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize);
-
         prng::State rng{};
         prng::seed(rng);
+        ctx.xor_key = prng::next(rng);
+        if (ctx.xor_key == 0)
+            ctx.xor_key = 0xDEADBEEF;
+
+        ssn::resolve_all(ctx.ntdll_base, ctx.cache, ssn::kCacheSize, ctx.xor_key);
 
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
-                unsigned short offset = stub::write_stub(ctx.stub_page, ctx.cache[i].ssn, rng);
-                ctx.cache[i].stub_offset = offset;
+                unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
+                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng);
+                ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
             }
         }
 
@@ -60,10 +65,19 @@ namespace syscall {
 
     SYSCALL_FORCEINLINE nt::PVOID GetStub(const Context& ctx, unsigned int nt_hash) {
         auto* entry = ssn::lookup(
-            const_cast<ssn::SsnEntry*>(ctx.cache), ssn::kCacheSize, nt_hash);
+            const_cast<ssn::SsnEntry*>(ctx.cache), ssn::kCacheSize, nt_hash, ctx.xor_key);
         if (!entry)
             return nullptr;
-        return stub::get_stub(ctx.stub_page, entry->stub_offset);
+        unsigned short real_offset = ssn::decrypt_offset(entry, ctx.xor_key);
+        return stub::get_stub(ctx.stub_page, real_offset);
+    }
+
+    SYSCALL_FORCEINLINE unsigned short GetSSN(const Context& ctx, unsigned int nt_hash) {
+        auto* entry = ssn::lookup(
+            const_cast<ssn::SsnEntry*>(ctx.cache), ssn::kCacheSize, nt_hash, ctx.xor_key);
+        if (!entry)
+            return 0xFFFF;
+        return ssn::decrypt_ssn(entry, ctx.xor_key);
     }
 
     template<typename Fn, typename... Args>
@@ -79,7 +93,7 @@ namespace syscall {
         if (ctx.nt_free)
             stub::free_page(ctx.stub_page, ctx.nt_free);
 
-        intrinsics::mem_set(&ctx, 0, sizeof(Context));
+        intrinsics::secure_zero(&ctx, sizeof(Context));
     }
 
 } // namespace syscall

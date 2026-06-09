@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 #include <syscall/syscall.h>
 
 int main() {
@@ -30,9 +31,9 @@ int main() {
         { "NtCreateThreadEx",         HASH_CT("NtCreateThreadEx")         },
     };
     for (auto& t : targets) {
-        auto* entry = syscall::ssn::lookup(ctx.cache, syscall::ssn::kCacheSize, t.hash);
-        if (entry)
-            printf("  %-30s SSN=0x%04X\n", t.name, entry->ssn);
+        unsigned short ssn = syscall::GetSSN(ctx, t.hash);
+        if (ssn != 0xFFFF)
+            printf("  %-30s SSN=0x%04X\n", t.name, ssn);
         else
             printf("  %-30s NOT FOUND\n", t.name);
     }
@@ -85,6 +86,23 @@ int main() {
     printf("\n--- stub Page Protection ---\n");
     printf("stub page at %p should be PAGE_EXECUTE_READ (0x20) after init\n",
            ctx.stub_page.base);
+
+    printf("\n--- cache encryption check ---\n");
+    unsigned int target_hash = HASH_CT("NtAllocateVirtualMemory");
+    bool found_plaintext = false;
+    auto* raw = reinterpret_cast<unsigned char*>(ctx.cache);
+    unsigned int cache_bytes = sizeof(ctx.cache);
+    for (unsigned int i = 0; i <= cache_bytes - 4; ++i) {
+        unsigned int val;
+        memcpy(&val, raw + i, 4);
+        if (val == target_hash) {
+            found_plaintext = true;
+            break;
+        }
+    }
+    printf("  plaintext hash in raw cache: %s\n",
+           found_plaintext ? "found" : "not found");
+    printf("  xor key: 0x%08X\n", ctx.xor_key);
 
     syscall::Shutdown(ctx);
     return 0;

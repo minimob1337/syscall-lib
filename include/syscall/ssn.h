@@ -39,7 +39,7 @@ namespace syscall::ssn {
         return h;
     }
 
-    SYSCALL_FORCEINLINE unsigned int resolve_all(nt::PVOID ntdll_base, SsnEntry* cache, unsigned int cache_capacity) {
+    SYSCALL_FORCEINLINE unsigned int resolve_all(nt::PVOID ntdll_base, SsnEntry* cache, unsigned int cache_capacity, unsigned int xor_key) {
         auto* base = static_cast<nt::BYTE*>(ntdll_base);
 
         auto* exports = pe::get_export_dir(ntdll_base);
@@ -85,24 +85,34 @@ namespace syscall::ssn {
             while (cache[slot].hash != 0)
                 slot = (slot + 1) & (cache_capacity - 1);
 
-            cache[slot].hash = nt_hash;
-            cache[slot].ssn = static_cast<unsigned short>(i);
+            cache[slot].hash = nt_hash ^ xor_key;
+            cache[slot].ssn = static_cast<unsigned short>(i) ^ static_cast<unsigned short>(xor_key);
             cache[slot].stub_offset = 0;
         }
+
+        intrinsics::secure_zero(zw_entries, sizeof(zw_entries));
 
         return count;
     }
 
-    SYSCALL_FORCEINLINE SsnEntry* lookup(SsnEntry* cache, unsigned int cache_capacity, unsigned int nt_hash) {
+    SYSCALL_FORCEINLINE SsnEntry* lookup(SsnEntry* cache, unsigned int cache_capacity, unsigned int nt_hash, unsigned int xor_key) {
         unsigned int slot = nt_hash & (cache_capacity - 1);
 
         while (cache[slot].hash != 0) {
-            if (cache[slot].hash == nt_hash)
+            if (cache[slot].hash == (nt_hash ^ xor_key))
                 return &cache[slot];
             slot = (slot + 1) & (cache_capacity - 1);
         }
 
         return nullptr;
+    }
+
+    SYSCALL_FORCEINLINE unsigned short decrypt_ssn(const SsnEntry* entry, unsigned int xor_key) {
+        return entry->ssn ^ static_cast<unsigned short>(xor_key);
+    }
+
+    SYSCALL_FORCEINLINE unsigned short decrypt_offset(const SsnEntry* entry, unsigned int xor_key) {
+        return entry->stub_offset ^ static_cast<unsigned short>(xor_key >> 16);
     }
 
 } // namespace syscall::ssn
