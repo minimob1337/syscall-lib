@@ -54,7 +54,8 @@ namespace syscall::imports {
     }
 
     template<typename Fn, typename... Args>
-    SYSCALL_FORCEINLINE auto call(ImportEntry* cache, unsigned int cache_capacity, unsigned int module_hash, unsigned int func_hash, Args... args) {
+    SYSCALL_FORCEINLINE auto call(ImportEntry* cache, unsigned int cache_capacity,
+                                   unsigned int module_hash, unsigned int func_hash, Args... args) {
         auto addr = resolve(cache, cache_capacity, module_hash, func_hash);
         if (!addr)
             return static_cast<decltype(reinterpret_cast<Fn>(addr)(args...))>(0);

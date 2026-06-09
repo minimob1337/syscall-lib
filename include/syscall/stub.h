@@ -15,6 +15,7 @@ namespace syscall::stub {
     constexpr unsigned int kPageSize = 4096;
     // 16 pages, enough for 500+ randomized stubs
     constexpr unsigned int kStubRegionSize = kPageSize * 16;
+    static_assert(kStubRegionSize - kStubSize <= 0xFFFE, "max stub offset exceeds unsigned short range");
 
     struct JunkInsn {
         nt::BYTE bytes[4];

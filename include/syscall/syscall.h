@@ -54,6 +54,8 @@ namespace syscall {
             if (ctx.cache[i].hash != 0) {
                 unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
                 unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng);
+                if (offset == 0xFFFF)
+                    break;
                 ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
             }
         }
@@ -119,3 +121,4 @@ namespace syscall {
 
 #define DYNAMIC_CALL(ctx, FnType, module, func, ...) \
     ::syscall::DynamicCall<FnType>(ctx, HASH_CT(L##module), HASH_CT(func), __VA_ARGS__)
+
