@@ -4,6 +4,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 
 ## Features
 
+- Hook-resilient bootstrap (init never calls through ntdll, uses RWX PE section stubs)
 - PEB walking to find loaded modules
 - SSN resolution via Zw* address sorting
 - Per-stub randomized junk instructions (every stub has different bytes)
@@ -11,6 +12,12 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 - Forwarded export resolution (follows `kernel32 -> ntdll` chains)
 - Dynamic import system for non-syscall WinAPI (`GetCurrentProcessId`, `VirtualQuery`, etc.)
 - Fully `consteval` compile-time hashing
+
+## Requirements
+
+- Windows x64
+- C++20
+- MSVC or Clang-CL
 
 ## Usage
 
@@ -37,7 +44,7 @@ syscall::Shutdown(ctx);
 
 ## How it works
 
-1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs, generates a unique assembly stub for each syscall with random junk instructions, flips the stub page to `PAGE_EXECUTE_READ`
+1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs, patches bootstrap stubs in a small RWX PE section to allocate memory without calling through ntdll, generates a unique assembly stub for each syscall with random junk instructions, flips the stub page to `PAGE_EXECUTE_READ`
 2. **Invoke** - looks up the SSN from the encrypted cache, finds the corresponding stub, calls it directly (the stub does `mov r10,rcx / mov eax,SSN / syscall / ret` with junk bytes mixed in)
 3. **Shutdown** - securely zeros all context memory and frees the stub page
 
@@ -52,6 +59,7 @@ include/syscall/
   pe.h               - PE export table parsing + forwarded exports
   ssn.h              - SSN resolution + encrypted cache
   stub.h             - stub generation with junk instructions
+  bootstrap.h        - RWX PE section bootstrap stubs for hook-free init
   prng.h             - xorshift32 PRNG
   intrinsics.h       - CRT-free memory primitives
   dynamic_import.h   - non-syscall import resolution + cache
