@@ -8,6 +8,7 @@
 #include "ssn.h"
 #include "stub.h"
 #include "prng.h"
+#include "dynamic_import.h"
 
 namespace syscall {
 
@@ -17,6 +18,7 @@ namespace syscall {
         ssn::SsnEntry cache[ssn::kCacheSize];
         nt::fn_NtFreeVirtualMemory nt_free;
         unsigned int xor_key;
+        imports::ImportEntry import_cache[imports::kImportCacheSize];
         bool initialized;
     };
 
@@ -88,6 +90,15 @@ namespace syscall {
         return reinterpret_cast<Fn>(stub)(args...);
     }
 
+    SYSCALL_FORCEINLINE nt::PVOID ResolveImport(Context& ctx, unsigned int module_hash, unsigned int func_hash) {
+        return imports::resolve(ctx.import_cache, imports::kImportCacheSize, module_hash, func_hash);
+    }
+
+    template<typename Fn, typename... Args>
+    SYSCALL_FORCEINLINE auto DynamicCall(Context& ctx, unsigned int module_hash, unsigned int func_hash, Args... args) {
+        return imports::call<Fn>(ctx.import_cache, imports::kImportCacheSize, module_hash, func_hash, args...);
+    }
+
     SYSCALL_FORCEINLINE void Shutdown(Context& ctx) {
         if (!ctx.initialized)
             return;
@@ -102,3 +113,9 @@ namespace syscall {
 
 #define SYSCALL_INVOKE(ctx, NtFuncType, hash, ...) \
     ::syscall::Invoke<NtFuncType>(ctx, hash, __VA_ARGS__)
+
+#define DYNAMIC_IMPORT(ctx, module, func) \
+    ::syscall::ResolveImport(ctx, HASH_CT(L##module), HASH_CT(func))
+
+#define DYNAMIC_CALL(ctx, FnType, module, func, ...) \
+    ::syscall::DynamicCall<FnType>(ctx, HASH_CT(L##module), HASH_CT(func), __VA_ARGS__)

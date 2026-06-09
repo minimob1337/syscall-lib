@@ -82,7 +82,7 @@ int main() {
         printf("allocation failed\n");
     }
 
-    // Verify stub page is RX (not RWX)
+    // check stub page is RX
     printf("\n--- stub Page Protection ---\n");
     printf("stub page at %p should be PAGE_EXECUTE_READ (0x20) after init\n",
            ctx.stub_page.base);
@@ -103,6 +103,32 @@ int main() {
     printf("  plaintext hash in raw cache: %s\n",
            found_plaintext ? "found" : "not found");
     printf("  xor key: 0x%08X\n", ctx.xor_key);
+
+    printf("\n--- DynamicImport ---\n");
+
+    using fn_GetCurrentProcessId = unsigned long (SYSCALL_CALLCONV*)();
+    auto pid_fn = reinterpret_cast<fn_GetCurrentProcessId>(
+        DYNAMIC_IMPORT(ctx, "kernel32.dll", "GetCurrentProcessId"));
+    if (pid_fn) {
+        unsigned long pid = pid_fn();
+        printf("  GetCurrentProcessId: %lu\n", pid);
+    } else {
+        printf("  GetCurrentProcessId: resolve failed\n");
+    }
+
+    auto pid2 = DYNAMIC_CALL(ctx, fn_GetCurrentProcessId, "kernel32.dll", "GetCurrentProcessId");
+    printf("  DynamicCall result:  %lu\n", pid2);
+
+    auto pid_fn2 = reinterpret_cast<fn_GetCurrentProcessId>(
+        DYNAMIC_IMPORT(ctx, "kernel32.dll", "GetCurrentProcessId"));
+    if (pid_fn2) {
+        printf("  cached resolve:      %lu\n", pid_fn2());
+        printf("  same address:        %s\n", pid_fn == pid_fn2 ? "yes" : "no");
+    }
+
+    using fn_GetCurrentThreadId = unsigned long (SYSCALL_CALLCONV*)();
+    auto tid = DYNAMIC_CALL(ctx, fn_GetCurrentThreadId, "kernel32.dll", "GetCurrentThreadId");
+    printf("  GetCurrentThreadId:  %lu\n", tid);
 
     syscall::Shutdown(ctx);
     return 0;
