@@ -29,6 +29,8 @@ namespace syscall {
         if (!entry)
             return nullptr;
         unsigned short real_offset = ssn::decrypt_offset(entry, ctx.xor_key);
+        if (real_offset == 0xFFFF)
+            return nullptr;
         return stub::get_stub(ctx.stub_page, real_offset);
     }
 
@@ -115,6 +117,12 @@ namespace syscall {
             ctx.nt_unmap = fn_unmap;
         }
 
+        // mark all entries as having no stub before writing
+        unsigned short invalid_enc = 0xFFFF ^ static_cast<unsigned short>(ctx.xor_key >> 16);
+        for (unsigned int i = 0; i < ssn::kCacheSize; ++i)
+            if (ctx.cache[i].hash != 0)
+                ctx.cache[i].stub_offset = invalid_enc;
+
         // write stubs to the RW mapped page
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
@@ -158,14 +166,10 @@ namespace syscall {
         if (ctx.nt_unmap)
             stub::free_page(ctx.stub_page, ctx.nt_unmap);
 
-        bootstrap::patch_ssn(bootstrap::stub_create_section, 0);
-        bootstrap::patch_ssn(bootstrap::stub_map_view, 0);
-        bootstrap::patch_ssn(bootstrap::stub_unmap_view, 0);
-        bootstrap::patch_ssn(bootstrap::stub_close, 0);
-        bootstrap::patch_gadget(bootstrap::stub_create_section, nullptr);
-        bootstrap::patch_gadget(bootstrap::stub_map_view, nullptr);
-        bootstrap::patch_gadget(bootstrap::stub_unmap_view, nullptr);
-        bootstrap::patch_gadget(bootstrap::stub_close, nullptr);
+        bootstrap::reset_stub(bootstrap::stub_create_section);
+        bootstrap::reset_stub(bootstrap::stub_map_view);
+        bootstrap::reset_stub(bootstrap::stub_unmap_view);
+        bootstrap::reset_stub(bootstrap::stub_close);
 
         intrinsics::secure_zero(&ctx, sizeof(Context));
     }

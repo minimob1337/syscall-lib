@@ -60,4 +60,17 @@ namespace syscall::bootstrap {
         return reinterpret_cast<nt::fn_NtClose>(static_cast<nt::PVOID>(stub_close));
     }
 
+    // restore stub to its original template so bootstrap works on reinit
+    SYSCALL_FORCEINLINE void reset_stub(unsigned char* stub) {
+        static constexpr unsigned char tmpl[22] = {
+            0x4C, 0x8B, 0xD1,
+            0xB8, 0x00, 0x00, 0x00, 0x00,
+            0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+        volatile unsigned char* p = static_cast<volatile unsigned char*>(stub);
+        for (int i = 0; i < 22; ++i)
+            p[i] = tmpl[i];
+    }
+
 } // namespace syscall::bootstrap

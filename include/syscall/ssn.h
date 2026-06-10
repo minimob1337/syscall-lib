@@ -128,12 +128,14 @@ namespace syscall::ssn {
     // max neighbor distance to search in each direction
     constexpr unsigned int kMaxNeighborSearch = 20;
 
+    constexpr unsigned int kMaxNopSkip = 8;
+
     // check if a syscall stub prologue is hooked
     SYSCALL_FORCEINLINE bool is_stub_hooked(const nt::BYTE* addr) {
         const nt::BYTE* p = addr;
 
         // skip leading nops
-        while (*p == 0x90)
+        for (unsigned int n = 0; n < kMaxNopSkip && *p == 0x90; ++n)
             ++p;
 
         // known hook signatures
@@ -156,7 +158,7 @@ namespace syscall::ssn {
     // read ssn from an unhooked stub (assumes 4C 8B D1 B8 xx xx 00 00)
     SYSCALL_FORCEINLINE unsigned short read_stub_ssn(const nt::BYTE* addr) {
         const nt::BYTE* p = addr;
-        while (*p == 0x90)
+        for (unsigned int n = 0; n < kMaxNopSkip && *p == 0x90; ++n)
             ++p;
         // ssn is the two bytes after 4C 8B D1 B8
         return static_cast<unsigned short>(p[4]) |
@@ -164,23 +166,29 @@ namespace syscall::ssn {
     }
 
     // walk neighbors to recover ssn from a hooked stub via halo's gate
-    SYSCALL_FORCEINLINE bool recover_ssn_from_neighbors(const nt::BYTE* stub_addr, unsigned short& out_ssn) {
-        // search upward (lower addresses) and downward (higher addresses)
+    SYSCALL_FORCEINLINE bool recover_ssn_from_neighbors(
+        const nt::BYTE* stub_addr,
+        const nt::BYTE* image_base,
+        nt::DWORD image_size,
+        unsigned short& out_ssn)
+    {
         for (unsigned int dist = 1; dist <= kMaxNeighborSearch; ++dist) {
-            // check neighbor above
-            const nt::BYTE* up = stub_addr - (dist * kStubStride);
-            if (!is_stub_hooked(up)) {
-                unsigned short neighbor_ssn = read_stub_ssn(up);
-                out_ssn = static_cast<unsigned short>(neighbor_ssn + dist);
-                return true;
+            // check neighbor above (with bounds check)
+            if (stub_addr - (dist * kStubStride) >= image_base) {
+                const nt::BYTE* up = stub_addr - (dist * kStubStride);
+                if (!is_stub_hooked(up)) {
+                    out_ssn = static_cast<unsigned short>(read_stub_ssn(up) + dist);
+                    return true;
+                }
             }
 
-            // check neighbor below
-            const nt::BYTE* down = stub_addr + (dist * kStubStride);
-            if (!is_stub_hooked(down)) {
-                unsigned short neighbor_ssn = read_stub_ssn(down);
-                out_ssn = static_cast<unsigned short>(neighbor_ssn - dist);
-                return true;
+            // check neighbor below (with bounds check)
+            if (stub_addr + (dist * kStubStride) + kStubStride <= image_base + image_size) {
+                const nt::BYTE* down = stub_addr + (dist * kStubStride);
+                if (!is_stub_hooked(down)) {
+                    out_ssn = static_cast<unsigned short>(read_stub_ssn(down) - dist);
+                    return true;
+                }
             }
         }
         return false;
@@ -199,11 +207,13 @@ namespace syscall::ssn {
 
         nt::DWORD export_dir_rva = 0;
         nt::DWORD export_dir_size = 0;
+        nt::DWORD image_size = 0;
         {
             auto* dos = reinterpret_cast<nt::IMAGE_DOS_HEADER*>(base);
             auto* nt_hdr = reinterpret_cast<nt::IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
             export_dir_rva = nt_hdr->OptionalHeader.DataDirectory[0].VirtualAddress;
             export_dir_size = nt_hdr->OptionalHeader.DataDirectory[0].Size;
+            image_size = nt_hdr->OptionalHeader.SizeOfImage;
         }
 
         unsigned int fixed = 0;
@@ -254,7 +264,7 @@ namespace syscall::ssn {
             } else {
                 // stub is hooked, recover via neighbor walking
                 unsigned short recovered_ssn = 0;
-                if (recover_ssn_from_neighbors(stub_addr, recovered_ssn)) {
+                if (recover_ssn_from_neighbors(stub_addr, base, image_size, recovered_ssn)) {
                     unsigned short cached_ssn = decrypt_ssn(entry, xor_key);
                     if (recovered_ssn != cached_ssn) {
                         entry->ssn = recovered_ssn ^ static_cast<unsigned short>(xor_key);
