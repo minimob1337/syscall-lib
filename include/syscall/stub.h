@@ -11,11 +11,11 @@ namespace syscall::stub {
         unsigned int capacity;
     };
 
-    constexpr unsigned int kStubSize = 64;
+    constexpr unsigned int kStubSize = 128;
     constexpr unsigned int kPageSize = 4096;
     // 16 pages, enough for 500+ randomized stubs
     constexpr unsigned int kStubRegionSize = kPageSize * 16;
-    static_assert(kStubRegionSize - kStubSize <= 0xFFFE, "max stub offset exceeds unsigned short range");
+    static_assert(kStubRegionSize / kStubSize - 1 <= 0xFFFE, "max stub offset exceeds unsigned short range");
 
     struct JunkInsn {
         nt::BYTE bytes[4];
@@ -33,17 +33,16 @@ namespace syscall::stub {
         {{0x48, 0x87, 0xFF, 0x00}, 3},             // xchg rdi, rdi
     };
 
-    // writes 0-3 random junk instructions, returns bytes written
-    SYSCALL_FORCEINLINE unsigned int write_junk(nt::BYTE* dst, prng::State& rng) {
+    // writes 0-3 random junk instructions at cursor, returns new cursor
+    SYSCALL_FORCEINLINE unsigned int write_junk(volatile unsigned char* p, unsigned int cursor, prng::State& rng) {
         unsigned int count = prng::next_range(rng, 4);
-        unsigned int written = 0;
 
         for (unsigned int i = 0; i < count; ++i) {
             unsigned int idx = prng::next_range(rng, kJunkTableSize);
             for (unsigned char b = 0; b < kJunkTable[idx].len; ++b)
-                dst[written++] = kJunkTable[idx].bytes[b];
+                p[cursor++] = kJunkTable[idx].bytes[b];
         }
-        return written;
+        return cursor;
     }
 
     // create section and map RW view for writing stubs
@@ -146,49 +145,83 @@ namespace syscall::stub {
         return true;
     }
 
-    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn, prng::State& rng, nt::PVOID syscall_gadget) {
+    SYSCALL_FORCEINLINE unsigned short write_stub(StubPage& page, unsigned short ssn, prng::State& rng, nt::PVOID gadget, nt::PVOID spoof_stack_top) {
         if (page.used + kStubSize > page.capacity)
             return 0xFFFF;
 
-        nt::BYTE* dst = page.base + page.used;
-        unsigned int pos = 0;
-
-        pos += write_junk(dst + pos, rng);
-
-        // mov r10, rcx
-        dst[pos++] = 0x4C;
-        dst[pos++] = 0x8B;
-        dst[pos++] = 0xD1;
-
-        pos += write_junk(dst + pos, rng);
-
-        // mov eax, SSN
-        dst[pos++] = 0xB8;
-        dst[pos++] = static_cast<nt::BYTE>(ssn & 0xFF);
-        dst[pos++] = static_cast<nt::BYTE>((ssn >> 8) & 0xFF);
-        dst[pos++] = 0x00;
-        dst[pos++] = 0x00;
-
-        pos += write_junk(dst + pos, rng);
-
-        // jmp qword ptr [rip+0] -> lands on gadget addr below
-        dst[pos++] = 0xFF;
-        dst[pos++] = 0x25;
-        dst[pos++] = 0x00;
-        dst[pos++] = 0x00;
-        dst[pos++] = 0x00;
-        dst[pos++] = 0x00;
-
-        // inline gadget address (syscall;ret inside ntdll)
-        auto addr = reinterpret_cast<unsigned long long>(syscall_gadget);
-        for (int i = 0; i < 8; ++i)
-            dst[pos++] = static_cast<nt::BYTE>((addr >> (i * 8)) & 0xFF);
-
-        // int3 padding
-        while (pos < kStubSize)
-            dst[pos++] = 0xCC;
-
         unsigned short offset = static_cast<unsigned short>(page.used);
+        auto* stub = static_cast<unsigned char*>(page.base) + offset;
+        volatile unsigned char* p = static_cast<volatile unsigned char*>(stub);
+        unsigned int c = 0;
+
+        // fill with int3
+        for (unsigned int i = 0; i < kStubSize; ++i)
+            p[i] = 0xCC;
+
+        // prologue: push rbx
+        p[c++] = 0x53;
+        // mov rbx, rsp
+        p[c++] = 0x48; p[c++] = 0x89; p[c++] = 0xE3;
+        // mov rsp, [rip+disp32] -> DATA_SPOOF at stub+112
+        p[c++] = 0x48; p[c++] = 0x8B; p[c++] = 0x25;
+        int disp_spoof = 112 - static_cast<int>(c + 4);
+        p[c++] = static_cast<unsigned char>(disp_spoof & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_spoof >> 8) & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_spoof >> 16) & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_spoof >> 24) & 0xFF);
+
+        // push stack args 10 through 5
+        static constexpr unsigned char arg_offsets[] = { 0x58, 0x50, 0x48, 0x40, 0x38, 0x30 };
+        for (int i = 0; i < 6; ++i) {
+            p[c++] = 0xFF; p[c++] = 0x73; p[c++] = arg_offsets[i];
+        }
+
+        // sub rsp, 0x20 (shadow space)
+        p[c++] = 0x48; p[c++] = 0x83; p[c++] = 0xEC; p[c++] = 0x20;
+
+        // junk + mov r10, rcx
+        c = write_junk(p, c, rng);
+        p[c++] = 0x4C; p[c++] = 0x8B; p[c++] = 0xD1;
+
+        // junk + mov eax, SSN
+        c = write_junk(p, c, rng);
+        p[c++] = 0xB8;
+        p[c++] = static_cast<unsigned char>(ssn & 0xFF);
+        p[c++] = static_cast<unsigned char>((ssn >> 8) & 0xFF);
+        p[c++] = 0x00;
+        p[c++] = 0x00;
+
+        // junk + call [rip+disp32] -> DATA_GADGET at stub+120
+        c = write_junk(p, c, rng);
+        p[c++] = 0xFF; p[c++] = 0x15;
+        int disp_gadget = 120 - static_cast<int>(c + 4);
+        p[c++] = static_cast<unsigned char>(disp_gadget & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_gadget >> 8) & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_gadget >> 16) & 0xFF);
+        p[c++] = static_cast<unsigned char>((disp_gadget >> 24) & 0xFF);
+
+        // epilogue: add rsp, 0x50 (undo 6 pushes + shadow)
+        p[c++] = 0x48; p[c++] = 0x83; p[c++] = 0xC4; p[c++] = 0x50;
+        // mov rsp, rbx (restore real stack)
+        p[c++] = 0x48; p[c++] = 0x89; p[c++] = 0xDC;
+        // pop rbx
+        p[c++] = 0x5B;
+        // ret
+        p[c++] = 0xC3;
+
+        // DATA_SPOOF at stub+112
+        {
+            auto v = reinterpret_cast<unsigned long long>(spoof_stack_top);
+            for (int i = 0; i < 8; ++i)
+                p[112 + i] = static_cast<unsigned char>(v >> (i * 8));
+        }
+        // DATA_GADGET at stub+120
+        {
+            auto v = reinterpret_cast<unsigned long long>(gadget);
+            for (int i = 0; i < 8; ++i)
+                p[120 + i] = static_cast<unsigned char>(v >> (i * 8));
+        }
+
         page.used += kStubSize;
         return offset;
     }

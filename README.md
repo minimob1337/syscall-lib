@@ -6,6 +6,7 @@ Header-only, CRT-free Windows x64 syscall library. Resolves syscall numbers at r
 
 - Indirect syscalls via ntdll gadget (return address points into ntdll, clean stack for instrumentation callbacks)
 - SEC_NO_CHANGE stub page (mapped via NtCreateSection, EDR cannot change protection after creation)
+- Stack frame spoofing (RSP pivot to synthetic frames during syscalls, EDR stack walks see clean kernel32/ntdll chain)
 - Hook-resilient bootstrap on all compilers (init uses RWX PE section stubs instead of calling through ntdll)
 - PEB walking to find loaded modules
 - SSN resolution via Zw* address sorting with Halo's Gate verification (recovers correct SSNs from hooked stubs)
@@ -47,7 +48,7 @@ syscall::Shutdown(ctx);
 ## How it works
 
 1. **Init** - walks the PEB to find ntdll, parses its export table, sorts Zw* exports by address to derive SSNs. Patches bootstrap stubs in a RWX PE section to create a section and map views without ever calling through ntdll (MSVC uses linker pragma, GNU uses inline asm `.section` flags). Falls back to direct ntdll function pointers if the RWX section fails. Creates a pagefile-backed section with `SEC_NO_CHANGE`, maps a writable view to generate unique assembly stubs with random junk instructions, then remaps as `PAGE_EXECUTE_READ`. The `SEC_NO_CHANGE` flag prevents any protection changes after mapping
-2. **Invoke** - looks up the SSN from the encrypted cache, finds the corresponding stub, calls it directly (the stub does `mov r10,rcx / mov eax,SSN / jmp ntdll_gadget` with junk bytes mixed in, the `syscall; ret` executes from inside ntdll)
+2. **Invoke** - looks up the SSN from the encrypted cache, finds the corresponding stub, calls it directly (the stub saves the real stack, pivots RSP to a pre-built frame chain with kernel32/ntdll return addresses, copies stack arguments, then calls the ntdll `syscall; ret` gadget — EDR stack walks during the syscall see a normal thread root instead of your module)
 3. **Shutdown** - securely zeros all context memory and frees the stub page
 
 ## Project structure
@@ -61,6 +62,7 @@ include/syscall/
   pe.h               - PE export table parsing + forwarded exports
   ssn.h              - SSN resolution + encrypted cache
   stub.h             - stub generation with junk instructions
+  spoof.h            - stack frame spoofing via RSP pivot
   bootstrap.h        - RWX PE section bootstrap stubs for hook-free init
   prng.h             - xorshift32 PRNG
   intrinsics.h       - CRT-free memory primitives

@@ -10,6 +10,7 @@
 #include "prng.h"
 #include "dynamic_import.h"
 #include "bootstrap.h"
+#include "spoof.h"
 
 namespace syscall {
 
@@ -20,6 +21,8 @@ namespace syscall {
         unsigned int xor_key;
         imports::ImportEntry import_cache[imports::kImportCacheSize];
         nt::fn_NtUnmapViewOfSection nt_unmap;
+        nt::fn_NtClose nt_close;
+        spoof::SpoofStack spoof_stack;
         bool initialized;
     };
 
@@ -94,8 +97,13 @@ namespace syscall {
             fn_unmap = bootstrap::get_unmap_view();
             fn_close = bootstrap::get_close();
 
-            if (stub::alloc_page(ctx.stub_page, section_handle, fn_create, fn_map, fn_close))
+            if (stub::alloc_page(ctx.stub_page, section_handle, fn_create, fn_map, fn_close)) {
                 ctx.nt_unmap = fn_unmap;
+                ctx.nt_close = fn_close;
+                // allocate spoof stack for stack frame spoofing
+                if (!spoof::init(ctx.spoof_stack, ctx.ntdll_base, fn_create, fn_map, fn_close))
+                    return false;
+            }
         }
 
         // fall back to direct ntdll pointers if bootstrap failed
@@ -115,6 +123,11 @@ namespace syscall {
                 return false;
 
             ctx.nt_unmap = fn_unmap;
+            ctx.nt_close = fn_close;
+
+            // allocate spoof stack for stack frame spoofing
+            if (!spoof::init(ctx.spoof_stack, ctx.ntdll_base, fn_create, fn_map, fn_close))
+                return false;
         }
 
         // mark all entries as having no stub before writing
@@ -127,7 +140,7 @@ namespace syscall {
         for (unsigned int i = 0; i < ssn::kCacheSize; ++i) {
             if (ctx.cache[i].hash != 0) {
                 unsigned short real_ssn = ssn::decrypt_ssn(&ctx.cache[i], ctx.xor_key);
-                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng, syscall_gadget);
+                unsigned short offset = stub::write_stub(ctx.stub_page, real_ssn, rng, syscall_gadget, ctx.spoof_stack.stack_top);
                 if (offset == 0xFFFF)
                     break;
                 ctx.cache[i].stub_offset = offset ^ static_cast<unsigned short>(ctx.xor_key >> 16);
@@ -162,6 +175,9 @@ namespace syscall {
     SYSCALL_FORCEINLINE void Shutdown(Context& ctx) {
         if (!ctx.initialized)
             return;
+
+        if (ctx.spoof_stack.base)
+            spoof::free(ctx.spoof_stack, ctx.nt_unmap, ctx.nt_close);
 
         if (ctx.nt_unmap)
             stub::free_page(ctx.stub_page, ctx.nt_unmap);

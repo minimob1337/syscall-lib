@@ -72,7 +72,7 @@ int main() {
     check(stub_a != nullptr, "NtAllocateVirtualMemory stub exists");
     check(stub_b != nullptr, "NtClose stub exists");
     if (stub_a && stub_b)
-        check(memcmp(stub_a, stub_b, 64) != 0, "stubs have different bytes");
+        check(memcmp(stub_a, stub_b, 128) != 0, "stubs have different bytes");
 
     printf("\n[stub page protection]\n");
     auto vq_fn = reinterpret_cast<fn_VirtualQuery>(
@@ -102,6 +102,54 @@ int main() {
         printf("  (status = 0x%08lX)\n", static_cast<unsigned long>(prot_status));
     }
 
+    printf("\n[stack spoofing]\n");
+    {
+        check(ctx.spoof_stack.base != nullptr, "spoof stack allocated");
+        check(ctx.spoof_stack.stack_top != nullptr, "spoof stack pivot target set");
+
+        if (ctx.spoof_stack.stack_top) {
+            // verify fake frames contain addresses in kernel32/ntdll
+            auto* pivot = static_cast<unsigned char*>(ctx.spoof_stack.stack_top);
+            unsigned long long frame1 = 0, frame2 = 0;
+            memcpy(&frame1, pivot + 0x00, 8);
+            memcpy(&frame2, pivot + 0x38, 8);
+            check(frame1 != 0, "BaseThreadInitThunk frame present");
+            check(frame2 != 0, "RtlUserThreadStart frame present");
+
+            // verify frames point into loaded modules
+            auto* k32_base = static_cast<unsigned char*>(
+                syscall::peb::find_module(HASH_CT(L"kernel32.dll")));
+            if (k32_base) {
+                auto* f1 = reinterpret_cast<unsigned char*>(frame1);
+                check(f1 >= k32_base && f1 < k32_base + 0x1000000,
+                    "frame1 points into kernel32");
+            }
+            auto* ntdll_base = static_cast<unsigned char*>(ctx.ntdll_base);
+            auto* f2 = reinterpret_cast<unsigned char*>(frame2);
+            check(f2 >= ntdll_base && f2 < ntdll_base + 0x1000000,
+                "frame2 points into ntdll");
+        }
+
+        // verify syscalls with >4 args still work (proves arg copying)
+        void* test_addr = nullptr;
+        syscall::nt::SIZE_T test_size = 0x1000;
+        auto st = syscall::Invoke<syscall::nt::fn_NtAllocateVirtualMemory>(
+            ctx, HASH_CT("NtAllocateVirtualMemory"),
+            reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
+            &test_addr, (syscall::nt::ULONG_PTR)0, &test_size,
+            syscall::nt::kMemCommit | syscall::nt::kMemReserve,
+            syscall::nt::kPageRw);
+        check(st == 0, "6-arg syscall works with stack spoofing");
+        if (st == 0 && test_addr) {
+            syscall::nt::PVOID fa = test_addr;
+            syscall::nt::SIZE_T fs = 0;
+            syscall::Invoke<syscall::nt::fn_NtFreeVirtualMemory>(
+                ctx, HASH_CT("NtFreeVirtualMemory"),
+                reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(-1)),
+                &fa, &fs, syscall::nt::kMemRelease);
+        }
+    }
+
     printf("\n[indirect syscall]\n");
     auto* gadget = static_cast<unsigned char*>(syscall::pe::find_syscall_ret(ctx.ntdll_base));
     auto* ntdll = static_cast<unsigned char*>(ctx.ntdll_base);
@@ -111,17 +159,15 @@ int main() {
         check(gadget[0] == 0x0F && gadget[1] == 0x05 && gadget[2] == 0xC3, "gadget bytes are syscall;ret");
     }
     if (stub_a) {
-        // verify stub contains jmp [rip+0] (FF 25 00 00 00 00)
-        bool has_jmp = false;
-        for (int i = 0; i + 5 < 64; ++i) {
-            if (stub_a[i] == 0xFF && stub_a[i+1] == 0x25 &&
-                stub_a[i+2] == 0x00 && stub_a[i+3] == 0x00 &&
-                stub_a[i+4] == 0x00 && stub_a[i+5] == 0x00) {
-                has_jmp = true;
+        // verify stub contains call [rip+disp] (FF 15 xx xx xx xx)
+        bool has_call = false;
+        for (int i = 0; i + 5 < 128; ++i) {
+            if (stub_a[i] == 0xFF && stub_a[i+1] == 0x15) {
+                has_call = true;
                 break;
             }
         }
-        check(has_jmp, "stub uses indirect jmp (no inline syscall)");
+        check(has_call, "stub uses indirect call (no inline syscall)");
     }
 
     printf("\n[hook detection]\n");
