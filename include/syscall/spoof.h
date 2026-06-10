@@ -8,13 +8,18 @@
 
 namespace syscall::spoof {
 
+    // 256 per-thread slots so concurrent syscalls don't share a stack
+    constexpr unsigned int kSlotCount = 256;
+    constexpr unsigned int kSlotSize = 256;
+    constexpr unsigned int kSlotPivotOffset = 0x80;
+    constexpr unsigned int kSpoofRegionSize = kSlotCount * kSlotSize;
+
     struct SpoofStack {
         nt::PVOID base;
-        nt::PVOID stack_top;    // rsp pivot target
+        nt::PVOID stack_top;    // slot 0 pivot, runtime adds thread offset
         nt::HANDLE section;
     };
 
-    // offsets into target functions for fake return addresses
     constexpr unsigned int kBtiRetOffset = 0x14;
     constexpr unsigned int kRtutsRetOffset = 0x21;
 
@@ -32,10 +37,9 @@ namespace syscall::spoof {
         nt::fn_NtMapViewOfSection fn_map,
         nt::fn_NtClose fn_close)
     {
-        // create a small section for the fake stack
         nt::HANDLE section = nullptr;
         nt::LARGE_INTEGER section_size{};
-        section_size.QuadPart = 0x1000;
+        section_size.QuadPart = kSpoofRegionSize;
 
         auto status = fn_create(
             &section, nt::kSectionAllAccess, nullptr,
@@ -53,26 +57,25 @@ namespace syscall::spoof {
             return false;
         }
 
-        intrinsics::mem_set(base, 0, 0x1000);
+        intrinsics::mem_set(base, 0, kSpoofRegionSize);
 
         auto* frame_base = static_cast<nt::BYTE*>(base);
 
-        // find kernel32!BaseThreadInitThunk and ntdll!RtlUserThreadStart
         auto* k32 = peb::find_module(HASH_CT(L"kernel32.dll"));
         nt::PVOID bti = k32 ? pe::find_export(k32, HASH_CT("BaseThreadInitThunk")) : nullptr;
         nt::PVOID rtuts = pe::find_export(ntdll_base, HASH_CT("RtlUserThreadStart"));
 
-        // stack pivot target at page + 0x800
-        auto* pivot = frame_base + 0x800;
-
-        // fake frames above pivot point
-        if (bti)
-            write_ptr(pivot + 0x00, static_cast<nt::BYTE*>(bti) + kBtiRetOffset);
-        if (rtuts)
-            write_ptr(pivot + 0x38, static_cast<nt::BYTE*>(rtuts) + kRtutsRetOffset);
+        // write fake frames into every slot
+        for (unsigned int slot = 0; slot < kSlotCount; ++slot) {
+            auto* pivot = frame_base + slot * kSlotSize + kSlotPivotOffset;
+            if (bti)
+                write_ptr(pivot + 0x00, static_cast<nt::BYTE*>(bti) + kBtiRetOffset);
+            if (rtuts)
+                write_ptr(pivot + 0x38, static_cast<nt::BYTE*>(rtuts) + kRtutsRetOffset);
+        }
 
         ss.base = base;
-        ss.stack_top = pivot;
+        ss.stack_top = frame_base + kSlotPivotOffset;
         ss.section = section;
         return true;
     }

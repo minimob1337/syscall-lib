@@ -34,11 +34,13 @@ namespace syscall::stub {
     };
 
     // writes 0-3 random junk instructions at cursor, returns new cursor
-    SYSCALL_FORCEINLINE unsigned int write_junk(volatile unsigned char* p, unsigned int cursor, prng::State& rng) {
+    SYSCALL_FORCEINLINE unsigned int write_junk(volatile unsigned char* p, unsigned int cursor, prng::State& rng, unsigned int limit) {
         unsigned int count = prng::next_range(rng, 4);
 
         for (unsigned int i = 0; i < count; ++i) {
             unsigned int idx = prng::next_range(rng, kJunkTableSize);
+            if (cursor + kJunkTable[idx].len > limit)
+                break;
             for (unsigned char b = 0; b < kJunkTable[idx].len; ++b)
                 p[cursor++] = kJunkTable[idx].bytes[b];
         }
@@ -162,37 +164,49 @@ namespace syscall::stub {
         p[c++] = 0x53;
         // mov rbx, rsp
         p[c++] = 0x48; p[c++] = 0x89; p[c++] = 0xE3;
-        // mov rsp, [rip+disp32] -> DATA_SPOOF at stub+112
+        // mov eax, dword ptr gs:[0x48] (thread id from TEB)
+        p[c++] = 0x65; p[c++] = 0x8B; p[c++] = 0x04; p[c++] = 0x25;
+        p[c++] = 0x48; p[c++] = 0x00; p[c++] = 0x00; p[c++] = 0x00;
+        // shr eax, 2 (thread ids are multiples of 4)
+        p[c++] = 0xC1; p[c++] = 0xE8; p[c++] = 0x02;
+        // movzx eax, al (mask to 256 slots)
+        p[c++] = 0x0F; p[c++] = 0xB6; p[c++] = 0xC0;
+        // shl eax, 8 (slot index * 256 = slot offset)
+        p[c++] = 0xC1; p[c++] = 0xE0; p[c++] = 0x08;
+        // mov rsp, [rip+disp32] -> DATA_SPOOF at stub+112 (slot 0 pivot)
         p[c++] = 0x48; p[c++] = 0x8B; p[c++] = 0x25;
         int disp_spoof = 112 - static_cast<int>(c + 4);
         p[c++] = static_cast<unsigned char>(disp_spoof & 0xFF);
         p[c++] = static_cast<unsigned char>((disp_spoof >> 8) & 0xFF);
         p[c++] = static_cast<unsigned char>((disp_spoof >> 16) & 0xFF);
         p[c++] = static_cast<unsigned char>((disp_spoof >> 24) & 0xFF);
+        // add rsp, rax (adjust to this thread's slot)
+        p[c++] = 0x48; p[c++] = 0x01; p[c++] = 0xC4;
 
-        // push stack args 10 through 5
-        static constexpr unsigned char arg_offsets[] = { 0x58, 0x50, 0x48, 0x40, 0x38, 0x30 };
-        for (int i = 0; i < 6; ++i) {
+        // push stack args 12 through 5
+        static constexpr unsigned char arg_offsets[] = { 0x68, 0x60, 0x58, 0x50, 0x48, 0x40, 0x38, 0x30 };
+        for (int i = 0; i < 8; ++i) {
             p[c++] = 0xFF; p[c++] = 0x73; p[c++] = arg_offsets[i];
         }
 
         // sub rsp, 0x20 (shadow space)
         p[c++] = 0x48; p[c++] = 0x83; p[c++] = 0xEC; p[c++] = 0x20;
 
-        // junk + mov r10, rcx
-        c = write_junk(p, c, rng);
+        // junk limits: data at 112, remaining fixed bytes after each slot
+        // slot 1: mov_r10(3) + mov_eax(5) + call(6) + epilogue(9) = 23
+        // slot 2: mov_eax(5) + call(6) + epilogue(9) = 20
+        // slot 3: call(6) + epilogue(9) = 15
+        c = write_junk(p, c, rng, 112 - 23);
         p[c++] = 0x4C; p[c++] = 0x8B; p[c++] = 0xD1;
 
-        // junk + mov eax, SSN
-        c = write_junk(p, c, rng);
+        c = write_junk(p, c, rng, 112 - 20);
         p[c++] = 0xB8;
         p[c++] = static_cast<unsigned char>(ssn & 0xFF);
         p[c++] = static_cast<unsigned char>((ssn >> 8) & 0xFF);
         p[c++] = 0x00;
         p[c++] = 0x00;
 
-        // junk + call [rip+disp32] -> DATA_GADGET at stub+120
-        c = write_junk(p, c, rng);
+        c = write_junk(p, c, rng, 112 - 15);
         p[c++] = 0xFF; p[c++] = 0x15;
         int disp_gadget = 120 - static_cast<int>(c + 4);
         p[c++] = static_cast<unsigned char>(disp_gadget & 0xFF);
@@ -200,8 +214,8 @@ namespace syscall::stub {
         p[c++] = static_cast<unsigned char>((disp_gadget >> 16) & 0xFF);
         p[c++] = static_cast<unsigned char>((disp_gadget >> 24) & 0xFF);
 
-        // epilogue: add rsp, 0x50 (undo 6 pushes + shadow)
-        p[c++] = 0x48; p[c++] = 0x83; p[c++] = 0xC4; p[c++] = 0x50;
+        // epilogue: add rsp, 0x60 (undo 8 pushes + shadow)
+        p[c++] = 0x48; p[c++] = 0x83; p[c++] = 0xC4; p[c++] = 0x60;
         // mov rsp, rbx (restore real stack)
         p[c++] = 0x48; p[c++] = 0x89; p[c++] = 0xDC;
         // pop rbx

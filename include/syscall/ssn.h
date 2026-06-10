@@ -123,9 +123,7 @@ namespace syscall::ssn {
         return entry->stub_offset ^ static_cast<unsigned short>(xor_key >> 16);
     }
 
-    // x64 ntdll stub stride in bytes
     constexpr unsigned int kStubStride = 0x20;
-    // max neighbor distance to search in each direction
     constexpr unsigned int kMaxNeighborSearch = 20;
 
     constexpr unsigned int kMaxNopSkip = 8;
@@ -151,7 +149,6 @@ namespace syscall::ssn {
         if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0xD1 && p[3] == 0xB8)
             return false;
 
-        // anything else we don't recognize, treat as hooked
         return true;
     }
 
@@ -165,7 +162,7 @@ namespace syscall::ssn {
                (static_cast<unsigned short>(p[5]) << 8);
     }
 
-    // walk neighbors to recover ssn from a hooked stub via halo's gate
+    // walk neighbors to recover ssn from a hooked stub
     SYSCALL_FORCEINLINE bool recover_ssn_from_neighbors(
         const nt::BYTE* stub_addr,
         const nt::BYTE* image_base,
