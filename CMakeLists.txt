@@ -9,5 +9,6 @@ target_include_directories(syscall INTERFACE include)
 
 option(BUILD_TESTS "Build test project" ON)
 if(BUILD_TESTS)
+    enable_testing()
     add_subdirectory(test)
 endif()

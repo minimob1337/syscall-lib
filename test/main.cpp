@@ -30,6 +30,10 @@ using fn_VirtualQuery = unsigned long long (SYSCALL_CALLCONV*)(
 
 using fn_GetCurrentProcessId = unsigned long (SYSCALL_CALLCONV*)();
 using fn_GetCurrentThreadId = unsigned long (SYSCALL_CALLCONV*)();
+using fn_VirtualProtect = int (SYSCALL_CALLCONV*)(
+    void* address, unsigned long long size, unsigned long protect, unsigned long* old_protect);
+using fn_FlushInstructionCache = int (SYSCALL_CALLCONV*)(
+    void* process, const void* address, unsigned long long size);
 
 int main() {
     printf("=== syscall-lib ===\n\n");
@@ -42,6 +46,13 @@ int main() {
         printf("init failed\n");
         return 1;
     }
+
+    auto* loaded_ntdll = static_cast<unsigned char*>(
+        syscall::peb::find_module(HASH_CT(L"ntdll.dll")));
+    check(loaded_ntdll != nullptr, "loaded ntdll found");
+    check(ctx.ntdll_base != loaded_ntdll, "syscall ntdll is a separate mapping");
+    check(ctx.clean_ntdll.base == ctx.ntdll_base, "clean mapping is owned by context");
+    check(ctx.clean_ntdll.unmap != nullptr, "clean mapping has unmap function");
 
     int resolved = 0;
     for (unsigned int i = 0; i < syscall::ssn::kCacheSize; ++i)
@@ -85,6 +96,12 @@ int main() {
         check(mbi.Protect == 0x20, "stub page is PAGE_EXECUTE_READ");
         check(mbi.Protect != 0x40, "stub page is not PAGE_EXECUTE_READWRITE");
         printf("  (protect = 0x%02X)\n", mbi.Protect);
+
+        MEMORY_BASIC_INFORMATION clean_mbi{};
+        auto clean_result = vq_fn(ctx.ntdll_base, &clean_mbi, sizeof(clean_mbi));
+        check(clean_result > 0, "clean ntdll VirtualQuery succeeded");
+        if (clean_result > 0)
+            check(clean_mbi.Type == 0x01000000, "clean ntdll is a MEM_IMAGE view");
     }
 
     printf("\n[sec_no_change]\n");
@@ -124,10 +141,11 @@ int main() {
                 check(f1 >= k32_base && f1 < k32_base + 0x1000000,
                     "frame1 points into kernel32");
             }
-            auto* ntdll_base = static_cast<unsigned char*>(ctx.ntdll_base);
-            auto* f2 = reinterpret_cast<unsigned char*>(frame2);
-            check(f2 >= ntdll_base && f2 < ntdll_base + 0x1000000,
-                "frame2 points into ntdll");
+            if (loaded_ntdll) {
+                auto* f2 = reinterpret_cast<unsigned char*>(frame2);
+                check(f2 >= loaded_ntdll && f2 < loaded_ntdll + 0x1000000,
+                    "frame2 points into ntdll");
+            }
         }
 
         // verify syscalls with >4 args still work (proves arg copying)
@@ -157,6 +175,12 @@ int main() {
     if (gadget) {
         check(gadget >= ntdll && gadget < ntdll + 0x1000000, "gadget is inside ntdll");
         check(gadget[0] == 0x0F && gadget[1] == 0x05 && gadget[2] == 0xC3, "gadget bytes are syscall;ret");
+        if (stub_a) {
+            unsigned long long stub_gadget = 0;
+            memcpy(&stub_gadget, stub_a + 120, sizeof(stub_gadget));
+            check(stub_gadget == reinterpret_cast<unsigned long long>(gadget),
+                "generated stub targets the separate ntdll gadget");
+        }
     }
     if (stub_a) {
         // verify stub contains call [rip+disp] (FF 15 xx xx xx xx)
@@ -195,6 +219,122 @@ int main() {
 
             // verify hook detection identifies it as clean
             check(!syscall::ssn::is_stub_hooked(ntclose_addr), "NtClose detected as unhooked");
+        }
+    }
+
+    printf("\n[loaded ntdll hook isolation]\n");
+    auto* loaded_ntclose = loaded_ntdll ? static_cast<unsigned char*>(
+        syscall::pe::find_export(loaded_ntdll, HASH_CT("NtClose"))) : nullptr;
+    auto* clean_ntclose = static_cast<unsigned char*>(
+        syscall::pe::find_export(ctx.ntdll_base, HASH_CT("NtClose")));
+    auto virtual_protect = reinterpret_cast<fn_VirtualProtect>(
+        DYNAMIC_IMPORT(ctx, "kernel32.dll", "VirtualProtect"));
+    auto flush_instruction_cache = reinterpret_cast<fn_FlushInstructionCache>(
+        DYNAMIC_IMPORT(ctx, "kernel32.dll", "FlushInstructionCache"));
+    check(loaded_ntclose && clean_ntclose && virtual_protect && flush_instruction_cache,
+        "hook probe functions resolved");
+    if (loaded_ntclose && clean_ntclose && virtual_protect && flush_instruction_cache) {
+        unsigned char loaded_original[6];
+        unsigned char clean_original[6];
+        memcpy(loaded_original, loaded_ntclose, sizeof(loaded_original));
+        memcpy(clean_original, clean_ntclose, sizeof(clean_original));
+
+        auto invalid_handle = reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(0x1337));
+        auto baseline = syscall::Invoke<syscall::nt::fn_NtClose>(
+            ctx, HASH_CT("NtClose"), invalid_handle);
+
+        unsigned long old_protect = 0;
+        bool writable = virtual_protect(loaded_ntclose, sizeof(loaded_original),
+            0x40, &old_protect) != 0;
+        check(writable, "loaded NtClose can be patched for the probe");
+        if (writable) {
+            const unsigned char hook[6] = {0xB8, 0x01, 0x00, 0x42, 0xE0, 0xC3};
+            memcpy(loaded_ntclose, hook, sizeof(hook));
+            bool hook_flushed = flush_instruction_cache(
+                reinterpret_cast<void*>(static_cast<long long>(-1)),
+                loaded_ntclose, sizeof(hook)) != 0;
+
+            syscall::nt::NTSTATUS ordinary_status = 0;
+            syscall::nt::NTSTATUS private_status = 0;
+            if (hook_flushed) {
+                ordinary_status = reinterpret_cast<syscall::nt::fn_NtClose>(loaded_ntclose)(invalid_handle);
+                private_status = syscall::Invoke<syscall::nt::fn_NtClose>(
+                    ctx, HASH_CT("NtClose"), invalid_handle);
+            }
+            bool clean_unchanged = memcmp(clean_ntclose, clean_original, sizeof(clean_original)) == 0;
+
+            memcpy(loaded_ntclose, loaded_original, sizeof(loaded_original));
+            bool restore_flushed = flush_instruction_cache(
+                reinterpret_cast<void*>(static_cast<long long>(-1)),
+                loaded_ntclose, sizeof(loaded_original)) != 0;
+            unsigned long unused_protect = 0;
+            bool protection_restored = virtual_protect(loaded_ntclose,
+                sizeof(loaded_original), old_protect, &unused_protect) != 0;
+
+            check(hook_flushed && restore_flushed && protection_restored,
+                "loaded NtClose bytes and protection restored");
+            check(clean_unchanged, "separate ntdll copy stayed unchanged");
+            if (hook_flushed) {
+                check(static_cast<unsigned long>(ordinary_status) == 0xE0420001u,
+                    "ordinary NtClose call hit the hook");
+                check(private_status == baseline &&
+                    static_cast<unsigned long>(private_status) != 0xE0420001u,
+                    "library NtClose call bypassed the hook");
+            }
+        }
+    }
+
+    printf("\n[loaded ntdll gadget isolation]\n");
+    auto* loaded_gadget = loaded_ntdll ? static_cast<unsigned char*>(
+        syscall::pe::find_syscall_ret(loaded_ntdll)) : nullptr;
+    auto* clean_gadget = static_cast<unsigned char*>(
+        syscall::pe::find_syscall_ret(ctx.ntdll_base));
+    check(loaded_gadget && clean_gadget && loaded_gadget != clean_gadget &&
+        virtual_protect && flush_instruction_cache, "separate syscall gadgets resolved");
+    if (loaded_gadget && clean_gadget && loaded_gadget != clean_gadget &&
+        virtual_protect && flush_instruction_cache) {
+        unsigned char loaded_original[3];
+        unsigned char clean_original[3];
+        memcpy(loaded_original, loaded_gadget, sizeof(loaded_original));
+        memcpy(clean_original, clean_gadget, sizeof(clean_original));
+
+        auto invalid_handle = reinterpret_cast<syscall::nt::HANDLE>(static_cast<long long>(0x1337));
+        auto baseline = syscall::Invoke<syscall::nt::fn_NtClose>(
+            ctx, HASH_CT("NtClose"), invalid_handle);
+
+        unsigned long old_protect = 0;
+        bool writable = virtual_protect(loaded_gadget, sizeof(loaded_original),
+            0x40, &old_protect) != 0;
+        check(writable, "loaded syscall gadget can be patched for the probe");
+        if (writable) {
+            const unsigned char hook[3] = {0xC3, 0x90, 0x90};
+            memcpy(loaded_gadget, hook, sizeof(hook));
+            bool hook_flushed = flush_instruction_cache(
+                reinterpret_cast<void*>(static_cast<long long>(-1)),
+                loaded_gadget, sizeof(hook)) != 0;
+
+            syscall::nt::NTSTATUS private_status = 0;
+            if (hook_flushed)
+                private_status = syscall::Invoke<syscall::nt::fn_NtClose>(
+                    ctx, HASH_CT("NtClose"), invalid_handle);
+            bool loaded_changed = memcmp(loaded_gadget, hook, sizeof(hook)) == 0;
+            bool clean_unchanged = memcmp(clean_gadget, clean_original, sizeof(clean_original)) == 0;
+
+            memcpy(loaded_gadget, loaded_original, sizeof(loaded_original));
+            bool restore_flushed = flush_instruction_cache(
+                reinterpret_cast<void*>(static_cast<long long>(-1)),
+                loaded_gadget, sizeof(loaded_original)) != 0;
+            unsigned long unused_protect = 0;
+            bool protection_restored = virtual_protect(loaded_gadget,
+                sizeof(loaded_original), old_protect, &unused_protect) != 0;
+
+            check(hook_flushed && restore_flushed && protection_restored,
+                "loaded syscall gadget bytes and protection restored");
+            check(loaded_changed && clean_unchanged,
+                "loaded gadget changed while separate gadget stayed unchanged");
+            if (hook_flushed)
+                check(private_status == baseline,
+                    "library syscall succeeded with loaded gadget patched");
         }
     }
 
@@ -272,10 +412,11 @@ int main() {
     auto* heap_alloc = DYNAMIC_IMPORT(ctx, "kernel32.dll", "HeapAlloc");
     check(heap_alloc != nullptr, "kernel32!HeapAlloc resolved");
     if (heap_alloc) {
-        auto* ntdll_base = reinterpret_cast<unsigned char*>(ctx.ntdll_base);
-        auto* addr = reinterpret_cast<unsigned char*>(heap_alloc);
-        bool in_ntdll = (addr >= ntdll_base && addr < ntdll_base + 0x1000000);
-        check(in_ntdll, "HeapAlloc forwards into ntdll");
+        if (loaded_ntdll) {
+            auto* addr = reinterpret_cast<unsigned char*>(heap_alloc);
+            bool in_ntdll = (addr >= loaded_ntdll && addr < loaded_ntdll + 0x1000000);
+            check(in_ntdll, "HeapAlloc forwards into ntdll");
+        }
     }
 
     auto* heap_free = DYNAMIC_IMPORT(ctx, "kernel32.dll", "HeapFree");
@@ -289,6 +430,7 @@ int main() {
     bool reinit = syscall::Init(ctx2);
     check(reinit, "reinit succeeds");
     if (reinit) {
+        check(ctx2.ntdll_base != loaded_ntdll, "reinit maps a separate ntdll");
         auto ssn = syscall::GetSSN(ctx2, HASH_CT("NtClose"));
         check(ssn != 0xFFFF, "SSN lookup works after reinit");
         auto* stub = syscall::GetStub(ctx2, HASH_CT("NtClose"));

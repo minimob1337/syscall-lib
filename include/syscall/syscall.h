@@ -9,6 +9,7 @@
 #include "stub.h"
 #include "prng.h"
 #include "dynamic_import.h"
+#include "clean_ntdll.h"
 #include "bootstrap.h"
 #include "spoof.h"
 
@@ -16,6 +17,7 @@ namespace syscall {
 
     struct Context {
         nt::PVOID ntdll_base;
+        clean::Mapping clean_ntdll;
         stub::StubPage stub_page;
         ssn::SsnEntry cache[ssn::kCacheSize];
         unsigned int xor_key;
@@ -45,12 +47,33 @@ namespace syscall {
         return ssn::decrypt_ssn(entry, ctx.xor_key);
     }
 
+    SYSCALL_FORCEINLINE void CleanupRuntime(Context& ctx) {
+        if (ctx.spoof_stack.base && ctx.nt_unmap && ctx.nt_close)
+            spoof::free(ctx.spoof_stack, ctx.nt_unmap, ctx.nt_close);
+        if (ctx.stub_page.base && ctx.nt_unmap)
+            stub::free_page(ctx.stub_page, ctx.nt_unmap);
+        bootstrap::reset_stub(bootstrap::stub_create_section);
+        bootstrap::reset_stub(bootstrap::stub_map_view);
+        bootstrap::reset_stub(bootstrap::stub_unmap_view);
+        bootstrap::reset_stub(bootstrap::stub_close);
+    }
+
     SYSCALL_FORCEINLINE bool Init(Context& ctx) {
         intrinsics::mem_set(&ctx, 0, sizeof(Context));
 
-        ctx.ntdll_base = peb::find_module(HASH_CT(L"ntdll.dll"));
-        if (!ctx.ntdll_base)
+        nt::PVOID loaded_ntdll_base = peb::find_module(HASH_CT(L"ntdll.dll"));
+        if (!loaded_ntdll_base || !clean::map(ctx.clean_ntdll))
             return false;
+        ctx.ntdll_base = ctx.clean_ntdll.base;
+
+        auto fail = [&ctx]() {
+            CleanupRuntime(ctx);
+            clean::unmap(ctx.clean_ntdll);
+            intrinsics::secure_zero(&ctx, sizeof(Context));
+            return false;
+        };
+        if (ctx.ntdll_base == loaded_ntdll_base)
+            return fail();
 
         prng::State rng{};
         prng::seed(rng);
@@ -68,11 +91,11 @@ namespace syscall {
 
         if (create_ssn == 0xFFFF || map_ssn == 0xFFFF ||
             unmap_ssn == 0xFFFF || close_ssn == 0xFFFF)
-            return false;
+            return fail();
 
         nt::PVOID syscall_gadget = pe::find_syscall_ret(ctx.ntdll_base);
         if (!syscall_gadget)
-            return false;
+            return fail();
 
         nt::fn_NtCreateSection fn_create = nullptr;
         nt::fn_NtMapViewOfSection fn_map = nullptr;
@@ -101,8 +124,8 @@ namespace syscall {
                 ctx.nt_unmap = fn_unmap;
                 ctx.nt_close = fn_close;
                 // allocate spoof stack for stack frame spoofing
-                if (!spoof::init(ctx.spoof_stack, ctx.ntdll_base, fn_create, fn_map, fn_close))
-                    return false;
+                if (!spoof::init(ctx.spoof_stack, loaded_ntdll_base, fn_create, fn_map, fn_close))
+                    return fail();
             }
         }
 
@@ -118,16 +141,16 @@ namespace syscall {
                 pe::find_export(ctx.ntdll_base, HASH_CT("NtClose")));
 
             if (!fn_create || !fn_map || !fn_unmap || !fn_close)
-                return false;
+                return fail();
             if (!stub::alloc_page(ctx.stub_page, section_handle, fn_create, fn_map, fn_close))
-                return false;
+                return fail();
 
             ctx.nt_unmap = fn_unmap;
             ctx.nt_close = fn_close;
 
             // allocate spoof stack for stack frame spoofing
-            if (!spoof::init(ctx.spoof_stack, ctx.ntdll_base, fn_create, fn_map, fn_close))
-                return false;
+            if (!spoof::init(ctx.spoof_stack, loaded_ntdll_base, fn_create, fn_map, fn_close))
+                return fail();
         }
 
         // mark all entries as having no stub before writing
@@ -149,7 +172,7 @@ namespace syscall {
 
         // unmap RW view and remap as RX with SEC_NO_CHANGE
         if (!stub::finalize_page(ctx.stub_page, section_handle, fn_map, fn_unmap, fn_close))
-            return false;
+            return fail();
 
         ctx.initialized = true;
         return true;
@@ -176,17 +199,8 @@ namespace syscall {
         if (!ctx.initialized)
             return;
 
-        if (ctx.spoof_stack.base)
-            spoof::free(ctx.spoof_stack, ctx.nt_unmap, ctx.nt_close);
-
-        if (ctx.nt_unmap)
-            stub::free_page(ctx.stub_page, ctx.nt_unmap);
-
-        bootstrap::reset_stub(bootstrap::stub_create_section);
-        bootstrap::reset_stub(bootstrap::stub_map_view);
-        bootstrap::reset_stub(bootstrap::stub_unmap_view);
-        bootstrap::reset_stub(bootstrap::stub_close);
-
+        CleanupRuntime(ctx);
+        clean::unmap(ctx.clean_ntdll);
         intrinsics::secure_zero(&ctx, sizeof(Context));
     }
 
@@ -200,4 +214,3 @@ namespace syscall {
 
 #define DYNAMIC_CALL(ctx, FnType, module, func, ...) \
     ::syscall::DynamicCall<FnType>(ctx, HASH_CT(L##module), HASH_CT(func), __VA_ARGS__)
-
